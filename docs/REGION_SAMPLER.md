@@ -50,7 +50,7 @@ part 전용 모델(사람 파싱·동물 부위 분할 등)은 산업 결함·�
 → pipeline: proposals 로드·검증·hash 고정, 사용할 (proposal, operation)이 없으면 source_no_region
 → while quota < N:
     sampler v2(CPU): seed·source·attempt로 operation·level·proposal·방향·강도 선택
-    → DragFlow → 두 VQA (기존과 동일)
+    → DragFlow → CLIP 비현실 장면 필터 (T026부터, v1과 동일)
 ```
 
 GPU를 쓰는 곳은 1–2의 모델 호출뿐이다. 후처리(3–4), 검증, sampler는 CPU 코드이며 v1과 같이 seed·source·attempt에 대해 결정론적이고 가중치 없이 테스트한다. worker(`advv.backends.worker --kind proposal`)는 `advv.proposals.collect_raw`로 모델을 호출하고 raw mask와 점수만 receipt에 쓴다. 정리·필터·저장은 coordinator가 `build_proposals`/`write_proposals`로 한다. worker venv에도 advv가 import되어야 한다(`.venv-sam3/bin/python -m pip install --no-deps -e .`).
@@ -88,7 +88,7 @@ worker 세부(`src/advv/backends/sam3.py`, 공식 commit `2345a4a`):
 - v3를 제자리 수정하지 않은 이유: v3는 `runs/v2_pilot_001`(T011)에서 실제로 쓰여 고정된 profile이 있다. v3 prompt·schema 파일은 그대로 두며, v3 profile은 `text_parts: false`인 v2(이름 없이 `subjects`만 사용)와 v1에서만 쓸 수 있다. `text_parts: true`인 v2는 config 검증이 v4 형식(`parts` 항목이 `subject`·`parts`를 가진 객체)을 요구한다. v3 flat `parts`를 subject별로 해석하는 호환 경로는 두지 않았다: T015에서 `src/advv`가 바뀌어 implementation hash가 달라지므로 v3 run은 어차피 재개할 수 없고, proposals.json·receipt schema도 `1.2`로 올라 v3 시절 파일은 읽지 않는다.
 - 문구 형태(`text_part_forms`): `subject_part`는 `"<entity 명사구> <part>"`(예: `excavator bucket`), `part`는 `"<part>"` 단독이다. 기본은 둘 다다. 어느 쪽이 SAM 3에서 더 잘 잡히는지 아직 실측하지 않았으므로 둘 다 묻고, 같은 부위의 두 결과는 중복 IoU로 하나만 남긴다. `part` 단독은 다른 객체의 같은 부위도 찾을 수 있지만 포함 비율 검사로 entity 밖 인스턴스를 거른다. 명사구 하나당 text 호출 1회(같은 state, 이미지 인코딩 재사용)라 비용은 subject별 part 수 × 2의 합 이하다(T015 전에는 part 수 × 2 × entity 명사구 수).
 - 이력: T012·T013은 v3를 제자리 수정했다(그때까지 v3를 쓴 run이 없었다). T011이 v3로 `v2_pilot_001`을 실행했으므로 T015부터는 새 버전(v4)을 만든다.
-- `subjects`·`parts`는 영역 proposal용 이름이며 보존 기준이 아니다(v4에서도 같다). 의미 보존 VQA의 `{{preservation_context}}`에는 profile의 `summary`·`must_preserve`·`uncertain`(과 사용자 `preserve_hint`)만 넣는다([SPEC §5](../SPEC.md#5-두-vqa의-입출력)).
+- `subjects`·`parts`는 영역 proposal용 이름이며 보존 기준이 아니다(v4에서도 같다). T026부터 profile은 판정에 쓰지 않는다(판정은 [SPEC §5](../SPEC.md#5-clip-필터의-입출력-t026)의 CLIP 필터).
 - `text_parts: true`이고 `object_region_v2`이면 config 검증이 profile schema의 `parts`가 필수이고 subject별 형식(v4)인지 확인한다. `text_parts: false`이면 worker에 part 이름을 넘기지 않고(point part만) proposals.json의 `parts`는 빈 목록이다.
 
 ### 3.2 proposal 필터 (초기값, 미검증)
@@ -152,7 +152,7 @@ worker 세부(`src/advv/backends/sam3.py`, 공식 commit `2345a4a`):
 - 필터는 후보만 좁힌다. operation별 granularity·grid·rotation 가능성 검사와 선택 순서(operation → level → proposal → 기하, 같은 seed 규칙)는 그대로이고, 남은 조합에서 결정론적으로 뽑는다. 남은 조합이 없으면 아래 규칙대로 `source_no_region` 보류이며 기하 영역이나 필터 없는 선택으로 대체하지 않는다.
 - 기록: 필터는 run `config.json`과 recipe hash에 들어가 재개 시 바뀌면 거부된다. `state.json`·`report.json`의 `region_proposals[source_id].region_phrase_filter`, `report.json`의 `region_phrase_filter`, `report.md` 첫머리, 각 계획의 `operation_params.region_phrase_filter`와 선택된 proposal의 phrase(`region_proposal_phrase`)에 남는다. 필터가 없으면 이 키들은 계획·state에 추가되지 않는다(`report.json`의 `region_phrase_filter`는 `null`).
 - 계획의 `region_phrase`와 편집 문장은 기존처럼 entity 명사구(`a part of the cat`)다.
-- 필터는 편집 후보 범위만 바꾼다. 물리·의미 보존 VQA의 prompt와 판정 기준은 그대로다(SPEC의 "수동 계획은 디버깅·재현용 선택 입력" 원칙과 같은 위치).
+- 필터는 편집 후보 범위만 바꾼다. CLIP 필터의 문장 목록과 판정 기준은 그대로다(SPEC의 "수동 계획은 디버깅·재현용 선택 입력" 원칙과 같은 위치).
 
 한 원본에서 선택 가능한 (proposal, operation) 조합이 없으면 `source_no_region`으로 보류하고 경고를 남긴다. 모든 원본이 보류되면 기존 `no_eligible_sources`로 종료한다. 기하 영역으로 대체하지 않는다.
 
@@ -311,7 +311,7 @@ GPU 통합 확인 (`tests/test_sam3_integration.py`는 `-m integration`; T009d�
 - 원본별 entity·part 수(출처별), 실패 원본, proposal 시간과 VRAM.
 - text part: `subject_part`와 `part` 형태별 점수·포함 비율 분포, `min_text_part_score` 0.5와 `text_part_containment` 0.85가 적절한지.
 - 균열·사고 차량처럼 명사구 grounding이 약할 수 있는 도메인의 실패 사례 기록.
-- v1과 v2의 소규모 N 비교: 물리/의미 VQA 통과율, 사람 검수로 본 이음매·잘린 객체 비율.
+- v1과 v2의 소규모 N 비교: CLIP 필터 통과율, 사람 검수로 본 이음매·잘린 객체 비율.
 - grounding 비교: SAM 3 vs Grounding DINO + SAM 2.1 (선택: Qwen3.5 box, 출력 좌표 형식을 먼저 실측).
 
 ## 8. 남은 결정

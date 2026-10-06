@@ -14,7 +14,7 @@ from ..storage import atomic_json, read_json, within
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--kind", choices=["generator", "verifier", "proposal"], required=True)
+    parser.add_argument("--kind", choices=["generator", "profiler", "clip", "proposal"], required=True)
     parser.add_argument("--run-dir", type=Path, required=True)
     args = parser.parse_args()
     cfg = read_json(args.run_dir / "config.json")
@@ -25,10 +25,14 @@ def main():
         try:
             with contextlib.redirect_stdout(sys.stderr):
                 if backend is None:
-                    if args.kind == "verifier":
+                    if args.kind == "profiler":
                         from .qwen import Qwen
 
                         backend = Qwen(cfg)
+                    elif args.kind == "clip":
+                        from .clip import Clip
+
+                        backend = Clip(cfg)
                     elif args.kind == "proposal":
                         from .region import make_proposer
 

@@ -7,7 +7,7 @@ import signal
 from pathlib import Path
 
 from .backends.process import LocalBackend
-from .config import load_config, parse_gpus
+from .config import load_config, parse_gpus, require_clip_run
 from .errors import ADVVError
 from .human_review import review_run
 from .pipeline import Pipeline, create_run
@@ -33,7 +33,7 @@ def main(argv=None):
 
     signal.signal(signal.SIGTERM, interrupted)
     parser = argparse.ArgumentParser(
-        prog="advv", description="DragFlow augmentation with local Qwen verification"
+        prog="advv", description="DragFlow augmentation with a local CLIP implausible-scene filter"
     )
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("run", "preflight"):
@@ -44,7 +44,7 @@ def main(argv=None):
             "--target-count",
             type=positive_count,
             metavar="N",
-            help="Total new, unique images that pass both VQA checks",
+            help="Total new, unique images that pass the CLIP filter",
         )
         p.add_argument("--gpus", required=True, help="Allowed physical IDs, e.g. 0,1,2,3,4,5,6,7")
         if name == "run":
@@ -67,7 +67,7 @@ def main(argv=None):
     p = sub.add_parser("prepare", help="Download the pinned models; inference remains offline")
     p.add_argument("--project", type=Path, default=Path.cwd())
     p.add_argument(
-        "--only", choices=ONLY, default="all", help="all = DragFlow + Qwen; sam3 (gated) only on request"
+        "--only", choices=ONLY, default="all", help="all = DragFlow + Qwen + CLIP; sam3 (gated) only on request"
     )
     for name in ("export", "report", "review"):
         p = sub.add_parser(name)
@@ -111,6 +111,7 @@ def main(argv=None):
                 raise ADVVError("Resume requires --run-dir and --gpus; input/N changes require a new run")
             root = args.run_dir.resolve()
             cfg = read_json(root / "config.json")
+            require_clip_run(cfg)  # Before preflight, whose validation assumes the T026 config layout.
             cfg["execution"]["selected_gpu_ids"] = parse_gpus(args.gpus)
             preflight(cfg, check_inputs=False)
         else:

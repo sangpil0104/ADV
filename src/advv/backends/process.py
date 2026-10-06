@@ -18,7 +18,7 @@ from ..storage import read_json, safe_id, within
 class Worker:
     def __init__(self, kind: str, cfg: dict, run_dir: Path):
         selected = cfg["execution"]["selected_gpu_ids"]
-        # DragFlow uses two devices; Qwen and the proposal model use the first selected GPU.
+        # DragFlow uses two devices; Qwen, CLIP and the proposal model use the first selected GPU.
         gpus = selected[:2] if kind == "generator" else selected[:1]
         interpreter = cfg["execution"].get(kind + "_python")
         if not interpreter:
@@ -105,7 +105,7 @@ class Worker:
 
 
 class LocalBackend:
-    provenance = "dragflow+qwen_local"
+    provenance = "dragflow+qwen+clip_local"
 
     def __init__(self, cfg: dict, run_dir: Path):
         self.cfg, self.run_dir = cfg, run_dir
@@ -120,7 +120,7 @@ class LocalBackend:
 
     def complete(self, images, prompt, max_new_tokens, *, receipt=None) -> RawResponse:
         try:
-            result = self._worker("verifier").request(
+            result = self._worker("profiler").request(
                 {
                     "action": "complete",
                     "images": [str(p) for p in images],
@@ -133,6 +133,16 @@ class LocalBackend:
             self.close()
             raise
         return RawResponse(result["text"], result["info"])
+
+    def embed(self, images, texts, *, receipt=None) -> dict:
+        """Unit CLIP embeddings of images and texts (CLIP worker on the first selected GPU)."""
+        try:
+            return self._worker("clip").request(
+                {"action": "embed", "images": [str(p) for p in images], "texts": list(texts), "receipt": receipt}
+            )
+        except BackendError:
+            self.close()
+            raise
 
     def propose(self, source, subjects, parts, run_dir) -> dict:
         """Raw region proposals for one source (SAM 3 worker on the first selected GPU)."""
@@ -161,7 +171,7 @@ class LocalBackend:
         return read_raw(run_dir, folder)
 
     def generate(self, source, plan, run_dir) -> Generated:
-        self.close()  # Release Qwen before DragFlow occupies the selected GPUs.
+        self.close()  # Release Qwen/CLIP/SAM 3 before DragFlow occupies the selected GPUs.
         receipt = f"candidates/{plan.edit_id}/generation_receipt.json"
         saved = within(run_dir, receipt)
         if saved.exists():

@@ -1,6 +1,6 @@
 ---
 name: advv-orchestrator
-description: "ADVV(DragFlow + Qwen VQA 증강 파이프라인) 작업을 하위 에이전트(advv-researcher/implementer/qa/gpu-runner)에 나눠 맡기고 메인 세션은 분류·위임·보고만 하는 오케스트레이터. ADVV 코드 구현·수정, sampler v2, human review, 모델·라이선스 조사, 환경 설치, GPU 실행, 검증, 문서 동기화 요청 시 반드시 사용. 사용자가 질문을 연달아 던질 때, '진행 상황', '어떻게 되고 있어', '다시 실행', '이어서', '보완', '수정', '이전 결과 기반으로' 같은 후속 요청에도 사용. 코드·파일을 보지 않고 답할 수 있는 짧은 개념 질문은 직접 답한다."
+description: "ADVV(DragFlow 편집 + CLIP 비현실 장면 필터 증강 파이프라인) 작업을 하위 에이전트(advv-researcher/implementer/qa/gpu-runner)에 나눠 맡기고 메인 세션은 분류·위임·보고만 하는 오케스트레이터. ADVV 코드 구현·수정, sampler v2, human review, 모델·라이선스 조사, 환경 설치, GPU 실행, 검증, 문서 동기화 요청 시 반드시 사용. 사용자가 질문을 연달아 던질 때, '진행 상황', '어떻게 되고 있어', '다시 실행', '이어서', '보완', '수정', '이전 결과 기반으로' 같은 후속 요청에도 사용. 코드·파일을 보지 않고 답할 수 있는 짧은 개념 질문은 직접 답한다."
 ---
 
 # ADVV Orchestrator

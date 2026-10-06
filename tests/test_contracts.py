@@ -1,4 +1,3 @@
-import itertools
 import json
 
 import pytest
@@ -7,54 +6,34 @@ from advv.errors import DataError, ResponseError
 from advv.ingest import scan_sources
 from advv.sampler import sample_edit, validate_plan
 from advv.storage import delete_generated, file_hash, load_rgb, within
-from advv.verifiers.decision import decide
 from advv.verifiers.parser import parse_response
+
+
+PROFILE = '"summary":"s","must_preserve":["x"],"uncertain":false'
 
 
 @pytest.mark.parametrize(
     "text",
     [
         "YES",
-        '{"answer":"yes","reason":"ok"}',
-        '```json\n{"answer":"YES","reason":"ok"}\n```',
-        '{"answer":"YES","reason":"ok"} extra',
-        '{"answer":"YES","answer":"NO","reason":"ok"}',
-        '{"answer":"YES","reason":"ok","extra":1}',
-        '{"answer":true,"reason":"ok"}',
-        '{"answer":"YES","reason":""}',
-        '{"answer":"YES","reason":"   "}',
-        '{"answer":"YES","reason":NaN}',
-        '{"answer":"YES"}',
+        "{" + PROFILE.replace("false", "False") + "}",
+        "```json\n{" + PROFILE + "}\n```",
+        "{" + PROFILE + "} extra",
+        '{"summary":"a",' + PROFILE + "}",
+        "{" + PROFILE + ',"extra":1}',
+        '{"summary":"s","must_preserve":["x"],"uncertain":NaN}',
+        '{"summary":"s","must_preserve":["x"]}',
         "[]",
     ],
 )
-def test_strict_parser(cfg, text):
+def test_strict_profile_parser(cfg, text):
+    """The source profile is the only parsed model text left (T026); it stays strict."""
     with pytest.raises(ResponseError):
-        parse_response(text, cfg["_assets"]["vqa_schema"])
+        parse_response(text, cfg["_assets"]["profile_schema"])
 
 
-def test_reason_does_not_vote(cfg):
-    obj = parse_response(
-        ' {"answer":"NO","reason":"The word YES is irrelevant."} \n', cfg["_assets"]["vqa_schema"]
-    )
-    assert obj["answer"] == "NO"
-
-
-@pytest.mark.parametrize(
-    "physical,semantic", list(itertools.product(["YES", "NO", "UNCERTAIN", "error", "not_run"], repeat=2))
-)
-def test_verdict_matrix(physical, semantic):
-    def check(value):
-        return (
-            {"status": value}
-            if value in ("error", "not_run")
-            else {"status": "completed", "response": {"answer": value}}
-        )
-
-    result = decide({"physical": check(physical), "semantic": check(semantic)})
-    assert (result == "accepted") == (physical == semantic == "YES")
-    if "NO" in (physical, semantic):
-        assert result == "rejected"
+def test_profile_parser_accepts_exact_object(cfg):
+    assert parse_response(" {" + PROFILE + "} \n", cfg["_assets"]["profile_schema"])["uncertain"] is False
 
 
 def test_sampler_determinism_and_geometry(cfg, tmp_path):

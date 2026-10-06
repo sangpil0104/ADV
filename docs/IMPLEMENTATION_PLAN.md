@@ -1,6 +1,6 @@
 # 구현 단계와 완료 기준
 
-확정 요구사항은 SPEC v0.4 기준이다. 코드 및 CPU·로컬 Qwen 검증을 마쳤으며, 실제 DragFlow와 Qwen으로 N=1 생성·검증·저장을 완료했다. 확대된 실제 통합 검증과 연구 평가는 아래 미완료 항목으로 남긴다. [검증 범위](RUN_VERIFICATION.md)를 참고한다. 목표는 **총 N장의 현실적이고 의미가 보존된 새 이미지를 자동 생성하는 파이프라인**이다.
+확정 요구사항은 SPEC v0.5 기준이다. 코드 및 CPU·로컬 Qwen 검증을 마쳤으며, 실제 DragFlow와 Qwen으로 N=1 생성·검증·저장을 완료했다(T026 이전 Qwen VQA 판정). **T026(2026-10-06)에서 판정을 CLIP 비현실 장면 필터로 교체했다 — CPU 테스트·CPU 스모크만, GPU 실행과 margin 보정은 미실행.** 확대된 실제 통합 검증과 연구 평가는 아래 미완료 항목으로 남긴다. [검증 범위](RUN_VERIFICATION.md)를 참고한다. 목표는 **장면 수준의 명백한 물리 위배를 걸러낸 새 이미지 총 N장을 자동 생성하는 파이프라인**이다.
 
 ## P0. 외부 모델 연결과 입력 계약
 
@@ -19,7 +19,7 @@
 - [x] SourceProfile/EditRequest/CheckResult/Decision 계약과 엄격한 JSON 파서를 구현한다.
 - [x] seed·source ID·attempt index에 따른 연결 영역·방향·operation sampler를 구현한다.
 - [x] 총 N장 counter, 원본 round-robin, 무제한 반복, 사용자 중단·재개를 구현한다.
-- [x] 원자적 저장, 단일 writer lock, NO 삭제, 중복 제외를 구현한다.
+- [x] 원자적 저장, 단일 writer lock, rejected 삭제, 중복 제외를 구현한다.
 - [x] [시각화 명세](VISUALIZATION.md)의 start/end/area overlay와 원본·생성 결과 1×2 PNG 렌더러를 CPU에서 구현한다.
 - [x] fake backend는 CPU fixture 전용으로 표시하고 실제 dataset export와 분리한다.
 
@@ -27,23 +27,23 @@
 
 | 사례 | 기대 결과 |
 | --- | --- |
-| physical=YES, semantic=YES | 두 결과가 유효할 때만 accepted |
-| physical=YES, semantic=NO | rejected; 사고/결함 의미 변경을 통과시키지 않음 |
-| physical=NO/UNCERTAIN | semantic=not_run; 각각 rejected/uncertain |
-| physical=YES, semantic=UNCERTAIN/오류 | uncertain/verification_error, quota +0 |
-| 소문자·추가/중복 key·잘린 JSON·빈 reason·code fence | verification_error |
-| reason 또는 입력 prompt에만 YES가 있음 | answer를 대체하지 않음 |
+| 모든 문장 delta ≤ max_delta (같음 포함) | accepted (T026) |
+| 한 문장이라도 delta > max_delta | rejected; 초과 문장·delta 기록 |
+| 임베딩 개수·차원 오류, non-finite, timeout | verification_error, 제한된 기술 재시도, quota +0 |
+| 저장된 clip_filter 수치와 판정 불일치 | 재개·export에서 오류 |
+| 문장 파일 내용 변경 후 재개(주석만 변경은 허용) | 재개 거부, 새 run |
+| 원본 CLIP 기준·문장 임베딩 | 원본·run당 1회 고정, 재개 시 재사용 |
 | 동일 seed/source/attempt, 다른 worker 실행 순서 | 동일 계획·mask |
 | 범위 밖 좌표·빈 mask·항등 변환·비지원 operation | backend 호출 전 실패 |
-| 두 이미지의 순서나 원본/profile hash 변경 | 기존 semantic cache 재사용 금지 |
+| 후보 이미지·문장 목록·CLIP 모델 identity 변경 | 기존 CLIP check cache 재사용 금지 |
 | 원본 10장, 목표 N=3 | 총 3장 저장; 원본별 3장으로 처리하지 않음 |
-| 두 VQA YES이지만 원본/기존 후보와 동일 픽셀 | 중복 제외, quota 증가 없음 |
-| N-1장에서 NO·오류·중복 후 YES | N장에서 성공 종료; 다음 생성 호출 없음 |
-| NO가 긴 시퀀스로 반복됨 | 숨겨진 총 attempt cap 없이 유지; 테스트는 취소 이벤트로 종료 |
+| 필터 통과이지만 원본/기존 후보와 동일 픽셀 | 중복 제외, quota 증가 없음 |
+| N-1장에서 rejected·오류·중복 후 통과 | N장에서 성공 종료; 다음 생성 호출 없음 |
+| rejected가 긴 시퀀스로 반복됨 | 숨겨진 총 attempt cap 없이 유지; 테스트는 취소 이벤트로 종료 |
 | 사용자 취소 후 같은 run 재개 | 확정 count/attempt 보존, 중복 채택·재추론 없음 |
 | GPU ID만 바꿔 재개 | 허용, 새 execution segment 기록 |
 | 모델·prompt·sampler·profile 변경 후 재개 | 기존 run에 섞기 금지 |
-| NO record 저장 후 삭제 전에 중단 | 재개 시 삭제만 수행 |
+| rejected record 저장 후 삭제 전에 중단 | 재개 시 삭제만 수행 |
 | accepted 파일 저장 후 record 전에 중단 | hash/transaction 확인 후 복구; count 중복 없음 |
 | 원본·다른 run·외부 symlink를 삭제 대상으로 지정 | 삭제 차단 |
 | 원본 profile 모두 uncertain/error | no_eligible_sources, 성공 아님 |
@@ -51,9 +51,9 @@
 | 직사각형 원본의 리사이즈·패딩·EXIF 회전 | start/end/area에 같은 좌표 변환 적용 |
 | backend가 점·mask를 반올림/변환함 | 요청값과 실제 전달값을 구분하여 표시 |
 | 가까운 점·가장자리 점·작은 영역·anchor | 기호·좌표·범례가 가려지지 않음 |
-| 시각화 전후 실제 이미지·VQA 입력 | 파일/픽셀 hash 동일; overlay가 검증 입력에 섞이지 않음 |
-| NO 후보의 비교 PNG·썸네일이 존재 | 생성 픽셀 포함 복사본 삭제, 원본 설정 PNG 보존 |
-| N장 달성 후 시각화만 실패하여 재개 | 렌더링만 복구; 추가 생성·VQA·quota 증가 없음 |
+| 시각화 전후 실제 이미지·CLIP 입력 | 파일/픽셀 hash 동일; overlay가 검증 입력에 섞이지 않음 |
+| rejected 후보의 비교 PNG·썸네일이 존재 | 생성 픽셀 포함 복사본 삭제, 원본 설정 PNG 보존 |
+| N장 달성 후 시각화만 실패하여 재개 | 렌더링만 복구; 추가 생성·판정·quota 증가 없음 |
 
 완료 기준: 실제 가중치·네트워크·CUDA 없이 반복과 상태를 검증한다. 무제한 반복 테스트에 실제 무한 실행을 사용하지 않는다.
 
@@ -91,20 +91,21 @@
 - [ ] `assets/` 샘플로 proposal 품질·실패 사례를 확인하고 v1과 소규모 N의 VQA 통과율·이음매 비율을 비교한다.
 - [ ] grounding 비교: SAM 3 vs Grounding DINO + SAM 2.1 (선택: Qwen3.5 box, 좌표 형식 실측).
 
-## P3. 두 VQA와 목표 수량 반복
+## P3. CLIP 필터와 목표 수량 반복 (T026에서 두 VQA를 대체)
 
-- [x] candidate-only physical, source+candidate semantic 호출을 별도로 연결한다.
-- [x] non-thinking template, completion 추출, parser, raw response 기록을 구현한다.
-- [x] 각 판정의 completed/error/not_run 상태와 최종 AND 결합을 구현한다.
+- [x] ~~candidate-only physical, source+candidate semantic 호출~~ → T026에서 제거. CLIP worker(`clip` kind)로 후보 한 장 임베딩.
+- [x] 고정 문장 파일, 문장 임베딩(run당 1회)·원본 기준(원본당 1회) 고정, 재개 시 재사용, 문장 파일 변경 시 재개 거부.
+- [x] 문장별 delta 판정(`>` max_delta이면 rejected), accepted/rejected/verification_error, record·report·export 기록.
 - [ ] 생성/검증 GPU 생명주기를 반복 루프와 연결하고 사용자 선택 밖의 장치를 쓰지 않는지 확인한다.
-- [ ] 실제 소규모 N을 지정하여 목표 수량 달성·NO 제거·중단·재개를 검증한다.
+- [ ] CLIP worker GPU 실행과 `max_delta` 보정 실험(원본 대 원본 대조, 채택·사람 판정 표본의 문장별 delta 분포).
+- [ ] 실제 소규모 N을 지정하여 목표 수량 달성·rejected 제거·중단·재개를 검증한다.
 
-완료 기준: 실제 두 모델로 unique accepted N장을 만들고 계보와 두 판정을 추적한다. 통합 테스트에 시간 제한을 둘 수 있으나 production 총 실행 정책과 구분한다. 모델이 반드시 NO를 출력해야 하는 테스트는 두지 않고 결정론적 fixture로 분기를 검증한다.
+완료 기준: 실제 DragFlow·CLIP으로 unique accepted N장을 만들고 계보와 문장별 판정을 추적한다. 통합 테스트에 시간 제한을 둘 수 있으나 production 총 실행 정책과 구분한다. 결정론적 fixture로 분기를 검증한다.
 
 ## P4. 이미지 데이터셋과 품질 평가
 
 - [x] 확정/부분 export manifest를 만들고 성공/중단/실패를 구분한다.
-- [x] accepted/N, attempts, 두 check별 탈락, 중복, 원본별 기여, 시간/VRAM을 보고한다.
+- [x] accepted/N, attempts, rejected·탈락 문장별 빈도·문장별 delta 분포, 중복, 원본별 기여, 시간/VRAM을 보고한다.
 - [x] report에서 후보별 drag_plan/comparison 파일을 연결하고 삭제된 비교 이미지는 링크에서 제외한다.
 - [ ] [평가 계획](EVALUATION.md)에 따라 소규모 독립 검수 표본으로 현실성·의미 보존·다양성을 확인한다.
 - [x] 실제 설치·실행·GPU 선택·재개 예시와 한계를 README에 갱신한다.
@@ -113,8 +114,8 @@
 
 ## P4b. 사람 최종 검수
 
-- [x] run별 on/off: 설정 `human_review.enabled`(기본 false) 또는 `advv run --human-review`. 꺼지면 기존 Qwen 전용 파이프라인과 동일.
-- [x] `advv review`: 두 VQA 통과 이미지를 ← pass / → fail로 판정, fail은 판정 저장 후 삭제하고 재생성하지 않는다.
+- [x] run별 on/off: 설정 `human_review.enabled`(기본 false) 또는 `advv run --human-review`. 꺼지면 자동(CLIP 필터) 단계만.
+- [x] `advv review`: CLIP 필터 통과 이미지를 ← pass / → fail로 판정, fail은 판정 저장 후 삭제하고 재생성하지 않는다.
 - [x] `review/current.png` 한 파일을 갱신하는 원본·후보 비교 화면(VS Code 자동 갱신).
 - [x] export는 사람 pass만 포함, report에 pass/fail/pending 집계, 검수 시작 후 resume 거부.
 - [x] CPU 테스트: 판정·삭제·export 필터·중단 후 이어하기·resume 차단·hash 변경·삭제 실패 재시도·화살표 키 파싱.
@@ -124,9 +125,19 @@
 
 - [ ] 필요해진 과제의 GT와 task-specific exporter를 준비한다.
 - [ ] 증강 전 group split을 고정하고 공정한 비교군으로 후속 모델을 평가한다.
-- [ ] Qwen의 반복적인 도메인 오류가 확인될 때만 별도 fine-tuning 실험을 설계한다.
+- [ ] Qwen·CLIP의 반복적인 도메인 오류가 확인될 때만 별도 fine-tuning 실험을 설계한다.
 
-P5는 1차 파이프라인의 완료 조건이 아니다. Qwen 추가 학습이 필요하다고 미리 가정하지 않는다.
+P5는 1차 파이프라인의 완료 조건이 아니다. 모델 추가 학습이 필요하다고 미리 가정하지 않는다.
+
+## 2026-10-06 판정을 CLIP 비현실 장면 필터로 교체 (T026, GPU 미사용)
+
+- 사용자 결정(2026-10-06): Qwen 물리·의미 VQA 판정을 제거하고 CLIP으로 완전 교체(설정 선택형 아님). Qwen은 원본 profile에만 남는다. 의미 보존 자동 검사는 없고 사람 검수(선택)는 유지. 장면 수준의 명백한 물리 위배만 대상이며 국소 미세 artifact는 범위 밖.
+- 제거: `verifiers/decision.py`, `prompts/physical_plausibility_v1.txt`, `prompts/semantic_preservation_v1.txt`, `schemas/vqa_response.schema.json`, `tests/test_semantic_context.py`, `semantic_context`, `uncertain` 후보 상태, `decision` 설정 섹션, `storage.keep_uncertain_images`.
+- 추가: [`prompts/implausible_physics_v1.txt`](../prompts/implausible_physics_v1.txt)(16문장, 미보정 초기값), `verifiers/clip_filter.py`, `backends/clip.py`, worker kind `clip`/`profiler`, 설정 `profiler`(이전 `verifier`의 Qwen 설정)·`verifier`(CLIP)·`execution.profiler_python`/`clip_python`·`storage.persist_clip_scores`·`visualization.show_filter_results`. backend provenance `dragflow+qwen+clip_local`.
+- `verifier.max_delta` 0.03은 미검증 초기값. CPU 예비 측정(`.venv-qwen`, CPU, 실제 가중치): 기존 run의 채택 3장은 원본 대비 최대 delta 0.004–0.019, 같은 물체의 다른 정상 사진 쌍 0.015–0.024, 동일 이미지 0. 보정 근거로 쓰지 않는다.
+- 이전 run(Qwen VQA 기록)은 resume·report·export·review를 T026 안내 `DataError`로 거부한다. 저장된 결과물은 그대로 둔다.
+- 전체 CPU 테스트 **264개 통과**(통합 2개는 기본 제외), lint 통과. GPU·다운로드는 실행하지 않았다. `src/advv/*.py` 변경으로 implementation hash가 바뀌었다.
+- T026 QA 후속(T026-fix): CLI `run --resume`이 이전 run을 preflight 전에 T026 `DataError`로 거부(이전에는 `KeyError: profiler`). `decide()`가 문장별 `delta`·`exceeds`·`top`까지 재계산해 대조하고 후보 점수를 `checks.clip` 응답과 대조한다. 재개·export는 행의 문장 목록·원본 점수를 `clip/texts.json`·`clip/sources/`와 대조한다. SPEC에 export 행 `clip_filter` 설명 추가. "detached from the machine" 문장의 산업 고장 중복 가능성은 v1에서 바꾸지 않고 보정(EVALUATION §4.1-5) 후 v2에서 결정. 전체 CPU 테스트 **271개 통과**, lint 통과.
 
 ## 초기 구현의 검증 기록 (2026-09-29)
 

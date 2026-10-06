@@ -5,7 +5,7 @@
 ## DragFlow
 
 - 논문: [DragFlow: Unleashing DiT Priors with Region Based Supervision for Drag Editing](https://arxiv.org/abs/2510.02253), arXiv:2510.02253. 확인한 문서 버전은 v3이다.
-- [논문 본문](https://arxiv.org/html/2510.02253v3): FLUX 기반 영역 단위 편집, affine supervision, 배경 보존, subject consistency를 다룬다. ADVV의 생성 후 VQA 채택 정책은 이 프로젝트에서 추가하는 설계다. 논문의 intent 해석용 MLLM과 혼동하지 않는다.
+- [논문 본문](https://arxiv.org/html/2510.02253v3): FLUX 기반 영역 단위 편집, affine supervision, 배경 보존, subject consistency를 다룬다. ADVV의 생성 후 채택 정책(T026부터 CLIP 필터)은 이 프로젝트에서 추가하는 설계다. 논문의 intent 해석용 MLLM과 혼동하지 않는다.
 - [공식 저장소](https://github.com/Edennnnnnnnnn/DragFlow): 설치·demo·benchmark 지침. dual 24 GB GPU 사용 설명이 있으며 ADVV 전체 장비 요구량을 뜻하지 않는다.
 - [벤치마크 runner](https://github.com/Edennnnnnnnnn/DragFlow/blob/main/framework/bench_dragflow.py): Dragger 호출 흐름과 CLI 전역 동작 확인.
 - [Dragger 구현](https://github.com/Edennnnnnnnnn/DragFlow/blob/main/framework/dragger.py): core class와 두 CUDA 장치 참조 확인.
@@ -26,13 +26,23 @@
 
 ## Qwen
 
-- [Qwen3.5-4B 공식 모델 카드](https://huggingface.co/Qwen/Qwen3.5-4B): 이미지·텍스트 입력을 지원하는 post-trained checkpoint와 로컬 실행 자료, thinking 비활성화 방법을 확인했다. 이 프로젝트의 기본 모델이다.
+- [Qwen3.5-4B 공식 모델 카드](https://huggingface.co/Qwen/Qwen3.5-4B): 이미지·텍스트 입력을 지원하는 post-trained checkpoint와 로컬 실행 자료, thinking 비활성화 방법을 확인했다. 이 프로젝트의 기본 profile 모델이다(T026부터 후보 판정에는 쓰지 않는다).
 - [Qwen 공식 모델 목록](https://huggingface.co/Qwen/models): 2026-09-29 확인한 공식 범용 4B급 이미지 VQA 모델 중 Qwen3.5-4B를 선택했다. 모델 계열 번호가 더 높다는 이유만으로 4B 공개 checkpoint가 있다고 가정하지 않는다.
 - [공식 저장소의 릴리스 이력](https://github.com/QwenLM/Qwen3.8): Qwen3.5의 소형 모델 공개일은 2026-03-02로 안내한다. 기존 `QwenLM/Qwen3.5` 주소가 새 계열 저장소로 redirect되어 구체적인 사용법은 선택 모델 카드와 revision을 기준으로 확인한다.
 
 모델 카드와 라이브러리 버전별 예제 API가 다를 수 있으므로 구현에서는 선택한 버전에 맞는 하나의 경로를 검증하고 고정한다. 이미지 입력을 지원하는 다른 Qwen으로 바꾸면 동일한 prompt·parser 계약을 유지하되 별도 실험 revision을 부여한다.
 
 추가 fine-tuning 없이 checkpoint로 VQA를 시작하는 것은 ADVV의 초기 설계 선택이다. 그것만으로 산업 결함 판정이나 희귀 생물 식별의 정확도가 입증되는 것은 아니다. Qwen3.5 지원 버전을 실제 검증하기 전 예전 Qwen3-VL용 환경 하한을 재사용하지 않는다.
+
+## CLIP 비현실 장면 필터 (T026, 2026-10-06)
+
+T026에서 Qwen 물리·의미 VQA 판정을 CLIP 필터로 교체했다(사용자 결정 2026-10-06). Qwen은 원본 profile에만 남는다.
+
+- 논문: [Learning Transferable Visual Models From Natural Language Supervision](https://arxiv.org/abs/2103.00020)(Radford et al., 2021, arXiv:2103.00020). 이미지·텍스트 임베딩을 같은 공간에 두고 cosine × `logit_scale`로 zero-shot 분류를 한다. ADVV는 `logit_scale`을 곱하지 않은 cosine을 쓰며, 원본 대비 상승폭(delta)으로 판정하는 것은 ADVV의 설계 선택이다(논문의 사용법이 아님).
+- [모델 카드 `openai/clip-vit-large-patch14`](https://huggingface.co/openai/clip-vit-large-patch14): 2026-10-06 확인. 모델 날짜 2021-01, "research output", **배포(deployed) 용도는 상업·비상업 모두 현재 범위 밖**이며 도메인 내 충분한 시험 없이 쓰지 말라고 적혀 있다. 카드 페이지에 라이선스 표기는 보이지 않았다. 감시·얼굴 인식 용도는 제외된다. ADVV의 증강 필터 사용은 연구 용도로 보고하며, 이 문구의 법적 효력은 판단하지 않는다.
+- [공식 코드 `openai/CLIP`](https://github.com/openai/CLIP): MIT license(2026-10-06 확인). ADVV는 이 코드를 쓰지 않고 Transformers `CLIPModel`/`CLIPProcessor` 포트를 쓴다.
+- 고정: revision `32bd64288804d66eefd0ccbe215aa642df71cc41`(`configs/upstream.lock.json`; DragFlow 의존성으로 이미 받아 둔 snapshot을 `models/weights.lock.json` 경로로 재사용, 새 다운로드 없음). 환경은 `.venv-qwen`(torch 2.6.0 / Transformers 5.17.0). Transformers 5에서 `get_text_features`/`get_image_features`는 `pooler_output`에 projection 임베딩을 담은 객체를 반환하므로 adapter가 두 형태를 모두 처리한다(코드 확인).
+- CPU 스모크(T026, GPU 미사용): 실제 가중치로 원본 3장·문장 16개를 임베딩, ADVV cosine과 모델 `logits_per_image / logit_scale` 차이 최대 9.5e-8. 원본 이미지의 문장 cosine은 0.07–0.20 범위였다(원본 자체도 "a car melted like liquid" 등에 0.2 가까이 나와 절대값 임계 대신 원본 대비 delta를 쓰는 근거). 판정 정확도는 검증하지 않았다.
 
 ## 영역 proposal 모델 (sampler v2 후보)
 
@@ -70,10 +80,10 @@ Transformers 포트는 5.10.1에서 SAM 3 텍스트 인코더 가중치가 로�
 | 구분 | 내용 |
 | --- | --- |
 | 공식 자료로 확인 | DragFlow의 영역 편집 방식, 실제 runner/core class, 모델 설정, 각 환경의 안내 버전 |
-| 사용자 확정 | 전체 입력 총 N장, 자동 무작위 편집, 현실성·물리적 개연성과 원본 의미 보존 검증, 선택 설명, 총 상한 없는 반복, 로컬 4B급 Qwen, 실행 시 GPU 선택 |
-| ADVV 설계 선택 | physical/semantic 별도 호출, 자동 원본 profile, geometry sampler, 엄격한 JSON, UNCERTAIN 분리, 기본 NO 삭제, 독립 worker |
-| 실행 연결 확인 | 실제 DragFlow + Qwen N=1 생성·채택 및 해당 실행의 시간/메모리; [범위](RUN_VERIFICATION.md) 참조 |
-| 아직 검증하지 않음 | 확대된 통합 처리량, 도메인별 판정 성능, 후속 성능 개선 |
+| 사용자 확정 | 전체 입력 총 N장, 자동 무작위 편집, 선택 설명, 총 상한 없는 반복, 로컬 4B급 Qwen(profile), 실행 시 GPU 선택. T026(2026-10-06): 판정은 CLIP 고정 문장의 원본 대비 delta로 완전 교체, 의미 보존 자동 검사 제거, 장면 수준 위배만 대상 |
+| ADVV 설계 선택 | 자동 원본 profile, geometry/영역 sampler, 엄격한 profile JSON, CLIP cosine(logit scale 미적용)·`max_delta` 0.03(미검증), 원본·문장 임베딩 고정, 기본 rejected 삭제, 독립 worker |
+| 실행 연결 확인 | 실제 DragFlow + Qwen(당시 VQA 판정) N=1 생성·채택 및 해당 실행의 시간/메모리; [범위](RUN_VERIFICATION.md) 참조 |
+| 아직 검증하지 않음 | CLIP 필터 GPU 실행·margin 보정, 확대된 통합 처리량, 도메인별 판정 성능, 후속 성능 개선 |
 | 실행 전 확정 | 사용자 목표 N, 도메인별 sampler 초기값 검증 |
 
 ## 남겨야 할 연결 기록

@@ -11,6 +11,7 @@ from .errors import ConfigError
 from .storage import atomic_bytes, atomic_json, file_hash, read_json
 
 QWEN = "Qwen/Qwen3.5-4B"
+CLIP = "openai/clip-vit-large-patch14"
 ONLY = ("all", "qwen", "dragflow", "support", "sam3")
 FLUX = "black-forest-labs/FLUX.1-dev"
 PATTERNS = {
@@ -33,7 +34,7 @@ PATTERNS = {
 
 
 def prepare(project: Path, *, only: str = "all") -> dict:
-    """Download pinned weights. "all" covers DragFlow and Qwen; gated SAM 3 needs --only sam3."""
+    """Download pinned weights. "all" covers DragFlow, Qwen and CLIP; gated SAM 3 needs --only sam3."""
     project = project.resolve()
     lock = read_json(project / "configs/upstream.lock.json")
     destination = project / "models/weights.lock.json"
@@ -121,18 +122,21 @@ def write_local_config(project: Path, weights: dict, lock: dict) -> Path:
         return path  # Existing user settings are never overwritten.
     cfg = yaml.safe_load((project / "configs/advv.example.yaml").read_text())
     cfg["execution"].update(
-        generator_python="../.venv-dragflow/bin/python", verifier_python="../.venv-qwen/bin/python"
+        generator_python="../.venv-dragflow/bin/python",
+        profiler_python="../.venv-qwen/bin/python",
+        clip_python="../.venv-qwen/bin/python",
     )
     cfg["generator"].update(
         revision=lock["dragflow_commit"],
         upstream_config="../third_party/DragFlow/framework/config.yaml",
         weights_lock="../models/weights.lock.json",
     )
-    cfg["verifier"].update(
+    cfg["profiler"].update(
         model_path=weights["models"][QWEN]["path"],
         model_revision=lock["models"][QWEN],
         processor_revision=lock["models"][QWEN],
     )
+    cfg["verifier"].update(model_path=weights["models"][CLIP]["path"], model_revision=lock["models"][CLIP])
     sam3 = lock.get("region_proposal", {}).get("sam3")
     if sam3 and sam3["model_id"] in weights["models"]:
         cfg["execution"]["proposal_python"] = "../.venv-sam3/bin/python"
@@ -163,12 +167,22 @@ def verify_weights(cfg: dict) -> dict:
         if not entry or not Path(entry["path"]).is_dir() or len(entry["revision"]) != 40:
             raise ConfigError(f"Missing pinned local weights: {repo}")
     qwen = weights["models"][QWEN]
+    profiler = cfg["profiler"]
     if (
-        Path(cfg["verifier"]["model_path"]).resolve() != Path(qwen["path"]).resolve()
-        or cfg["verifier"]["model_revision"] != qwen["revision"]
-        or cfg["verifier"]["processor_revision"] != qwen["revision"]
+        Path(profiler["model_path"]).resolve() != Path(qwen["path"]).resolve()
+        or profiler["model_revision"] != qwen["revision"]
+        or profiler["processor_revision"] != qwen["revision"]
     ):
         raise ConfigError("Qwen model/processor and weights lock disagree")
+    verifier = cfg["verifier"]
+    clip = weights["models"].get(verifier["model_id"])
+    if (
+        not clip
+        or not verifier.get("model_path")
+        or Path(verifier["model_path"]).resolve() != Path(clip["path"]).resolve()
+        or verifier["model_revision"] != clip["revision"]
+    ):
+        raise ConfigError("CLIP verifier model_path/model_revision and the weights lock disagree")
     return weights
 
 

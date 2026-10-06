@@ -9,21 +9,42 @@ from pathlib import Path
 import yaml
 
 from .backends.dragflow_speedups import parse_speedups
-from .errors import ConfigError
-from .storage import digest
+from .errors import ConfigError, DataError
+from .storage import digest, file_hash
+from .verifiers.clip_filter import CRITERION, SIMILARITY, load_sentences
 
 PATH_FIELDS = {
     "run": ["output_root"],
     "dataset": ["root", "input_dir", "manifest"],
     "source_profile": ["prompt_path", "response_schema"],
     "sampler": ["replay_plan"],
-    "execution": ["generator_python", "verifier_python", "proposal_python"],
+    "execution": ["generator_python", "profiler_python", "clip_python", "proposal_python"],
     "generator": ["repo_path", "upstream_config", "weights_lock"],
-    "verifier": ["model_path", "physical_prompt_path", "semantic_prompt_path", "response_schema"],
+    "profiler": ["model_path"],
+    "verifier": ["model_path", "sentences_path"],
 }
 OPTIONAL_PATH_FIELDS = {"region_proposal": ["model_path", "repo_path"]}
 SAMPLERS = ("random_geometry_v1", "object_region_v2")
 GRANULARITY = {"relocation": {"entity"}, "rotation": {"part"}, "deformation": {"part", "entity"}}
+LEGACY_VQA = (
+    "uses the Qwen physical/semantic VQA verification removed in T026; candidates are now judged by the "
+    "CLIP implausible-scene filter"
+)
+STORAGE_KEYS = {"delete_rejected_images", "keep_error_images", "persist_clip_scores", "atomic_writes"}
+
+
+def is_legacy_vqa(cfg: dict) -> bool:
+    verifier = cfg.get("verifier") or {}
+    return verifier.get("backend") == "qwen_multimodal_local" or "profiler" not in cfg
+
+
+def require_clip_run(cfg: dict) -> None:
+    """Runs made before T026 stay on disk as written; this code neither resumes nor re-derives them."""
+    if is_legacy_vqa(cfg):
+        raise DataError(
+            f"This run {LEGACY_VQA}. Its saved report.md and exports/images.jsonl remain as written; "
+            "resume/report/export/review it only with a git revision before T026, or start a new run"
+        )
 
 
 def load_config(path: Path, *, input_dir=None, target_count=None, gpus=None, human_review=None) -> dict:
@@ -32,6 +53,12 @@ def load_config(path: Path, *, input_dir=None, target_count=None, gpus=None, hum
         cfg = yaml.safe_load(stream)
     if not isinstance(cfg, dict):
         raise ConfigError("Config must be a YAML mapping")
+    if is_legacy_vqa(cfg):
+        raise ConfigError(
+            f"{path} {LEGACY_VQA}. Move the Qwen model settings to a 'profiler' section, replace 'verifier' "
+            "with the CLIP section, drop 'decision', and rename execution.verifier_python to profiler_python "
+            "(add clip_python); see configs/advv.example.yaml"
+        )
     for section, fields in {**PATH_FIELDS, **OPTIONAL_PATH_FIELDS}.items():
         if section in OPTIONAL_PATH_FIELDS and cfg.get(section) is None:
             continue
@@ -65,13 +92,14 @@ def load_config(path: Path, *, input_dir=None, target_count=None, gpus=None, hum
     for name, section, key in (
         ("profile_prompt", "source_profile", "prompt_path"),
         ("profile_schema", "source_profile", "response_schema"),
-        ("physical_prompt", "verifier", "physical_prompt_path"),
-        ("semantic_prompt", "verifier", "semantic_prompt_path"),
-        ("vqa_schema", "verifier", "response_schema"),
     ):
         asset = Path(cfg[section][key])
         value = asset.read_text(encoding="utf-8")
         assets[name] = json.loads(value) if name.endswith("schema") else value
+    sentences = Path(cfg["verifier"]["sentences_path"])
+    assets["implausible_sentences"] = load_sentences(sentences)
+    assets["implausible_sentences_sha256"] = digest(assets["implausible_sentences"])
+    assets["implausible_sentences_file_sha256"] = file_hash(sentences)
     cfg["_assets"] = assets
     validate_config(cfg)
     return cfg
@@ -187,33 +215,22 @@ def validate_config(cfg: dict) -> None:
         and cfg["source_profile"]["uncertain_action"] == "hold_source",
         "Profile must be fixed",
     )
-    v = cfg["verifier"]
-    require(
-        v["backend"] == "qwen_multimodal_local" and cfg["generator"]["backend"] == "dragflow",
-        "Real backend IDs required",
-    )
+    require(cfg["generator"]["backend"] == "dragflow", "Real generator backend ID required")
     parse_speedups(cfg["generator"].get("speedups"))
-    require(v["local_files_only"] and not v["fine_tune"], "Local pretrained inference required")
+    p = cfg["profiler"]
+    require(p["backend"] == "qwen_multimodal_local", "profiler.backend must be qwen_multimodal_local")
+    require(p["local_files_only"] and not p["fine_tune"], "Local pretrained inference required")
     require(
-        v["enable_thinking"] is False and v["do_sample"] is False and v["batch_size"] == 1,
+        p["enable_thinking"] is False and p["do_sample"] is False and p["batch_size"] == 1,
         "Unsupported decoding protocol",
     )
     require(
-        v["check_order"] == ["physical", "semantic"] and v["semantic_only_after_physical_yes"],
-        "Physical then semantic required",
-    )
-    require(
-        v["dtype"] in ("bfloat16", "float16", "float32") and v["quantization"] is None,
+        p["dtype"] in ("bfloat16", "float16", "float32") and p["quantization"] is None,
         "Unsupported dtype/quantization",
     )
-    require(v["preprocessing"]["policy"] == "pinned_processor_defaults", "Unsupported visual preprocessing")
-    require(cfg["decision"]["require_all_yes"] == ["physical", "semantic"], "Both checks required")
-    require(
-        [cfg["decision"][k] for k in ("accept_answer", "reject_answer", "uncertain_answer")]
-        == ["YES", "NO", "UNCERTAIN"],
-        "Verdict enums are fixed",
-    )
-    require(not cfg["decision"]["retry_semantic_decisions"], "Do not retry semantic NO/UNCERTAIN")
+    require(p["preprocessing"]["policy"] == "pinned_processor_defaults", "Unsupported visual preprocessing")
+    validate_verifier(cfg, require)
+    require("decision" not in cfg, f"The decision section {LEGACY_VQA}; remove it")
     x = cfg["export"]
     require(x["format"] == "jsonl" and x["allowed_status"] == "accepted", "Invalid export policy")
     require(
@@ -243,15 +260,43 @@ def validate_config(cfg: dict) -> None:
         "human_review must be {enabled: true|false}",
     )
     storage = cfg.get("storage", {})
+    require(set(storage) == STORAGE_KEYS, f"storage keys must be {sorted(STORAGE_KEYS)}")
     require(
-        storage.get("atomic_writes") is True and storage.get("persist_raw_vqa") is True,
-        "Atomic writes and raw VQA persistence are required",
+        storage["atomic_writes"] is True and storage["persist_clip_scores"] is True,
+        "Atomic writes and CLIP score persistence are required",
     )
     require(
         0 <= vis["area_alpha"] <= 1
         and type(vis["max_panel_side_px"]) is int
         and vis["max_panel_side_px"] >= 64,
         "Invalid preview dimensions/opacity",
+    )
+
+
+def validate_verifier(cfg: dict, require) -> None:
+    v = cfg["verifier"]
+    require(v.get("backend") == "clip_local", "verifier.backend must be clip_local")
+    require(isinstance(v.get("model_id"), str) and v["model_id"], "verifier.model_id required")
+    require(v.get("model_revision") is None or isinstance(v["model_revision"], str), "Invalid model_revision")
+    require(v.get("local_files_only") is True, "CLIP must load local files only")
+    require(v.get("dtype") in ("bfloat16", "float16", "float32"), "Unsupported CLIP dtype")
+    require(v.get("similarity") == SIMILARITY, f"verifier.similarity must be {SIMILARITY}")
+    require(v.get("criterion") == CRITERION, f"verifier.criterion must be {CRITERION}")
+    limit = v.get("max_delta")
+    # Cosine similarities lie in [-1, 1], so a delta above 2 could never reject anything.
+    require(
+        type(limit) in (int, float) and math.isfinite(limit) and 0 <= limit < 2,
+        "verifier.max_delta must be a number in [0, 2)",
+    )
+    require(
+        (v.get("preprocessing") or {}).get("policy") == "pinned_processor_defaults",
+        "Unsupported CLIP preprocessing",
+    )
+    require(v.get("retry_rejected_candidates") is False, "Do not re-judge a rejected candidate")
+    sentences = cfg.get("_assets", {}).get("implausible_sentences")
+    require(
+        isinstance(sentences, list) and sentences and all(isinstance(t, str) and t for t in sentences),
+        "verifier.sentences_path must list at least one sentence",
     )
 
 

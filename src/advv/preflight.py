@@ -82,7 +82,12 @@ def preflight(cfg: dict, *, check_inputs=True) -> dict:
         "Tencent/InstantCharacter": ["instantcharacter_ip-adapter.bin"],
         "google/siglip-so400m-patch14-384": ["model.safetensors", "preprocessor_config.json"],
         "facebook/dinov2-giant": ["model.safetensors", "preprocessor_config.json"],
-        "openai/clip-vit-large-patch14": ["model.safetensors", "tokenizer_config.json"],
+        "openai/clip-vit-large-patch14": [
+            "config.json",
+            "model.safetensors",
+            "preprocessor_config.json",
+            "tokenizer_config.json",
+        ],
     }
     for model, filenames in required.items():
         root = Path(weights["models"][model]["path"])
@@ -100,7 +105,8 @@ def preflight(cfg: dict, *, check_inputs=True) -> dict:
     environments = {}
     probes = {
         "generator": 'import sys; sys.path.insert(0,"framework"); from dragger import Dragger; import torch; print(torch.__version__)',
-        "verifier": "from transformers import Qwen3_5ForConditionalGeneration; import torch, transformers; print(torch.__version__, transformers.__version__)",
+        "profiler": "from transformers import Qwen3_5ForConditionalGeneration; import torch, transformers; print(torch.__version__, transformers.__version__)",
+        "clip": "from transformers import CLIPModel, CLIPProcessor; import torch, transformers; print(torch.__version__, transformers.__version__)",
     }
     for kind, code in probes.items():
         interpreter = cfg["execution"].get(kind + "_python")

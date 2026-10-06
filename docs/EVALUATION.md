@@ -2,9 +2,9 @@
 
 ## 1. 두 단계 목표
 
-**1차 목표**는 총 N장의 현실적이고 원본 의미가 유지된 증강 이미지를 자동 생성하는 파이프라인이다. 목표 수량 달성, 이미지 품질, 의미 보존, 다양성, 처리 비용, 중단·재개의 동작을 먼저 평가한다. **2차 목표**로 후속 모델의 일반화 성능 향상을 검증한다.
+**1차 목표**는 장면 수준의 명백한 물리 위배를 걸러낸 증강 이미지 총 N장을 자동 생성하는 파이프라인이다(T026부터 자동 판정은 CLIP 비현실 장면 필터, 의미 보존은 자동 검사하지 않음). 목표 수량 달성, 이미지 품질, 의미 보존, 다양성, 처리 비용, 중단·재개의 동작을 먼저 평가한다. **2차 목표**로 후속 모델의 일반화 성능 향상을 검증한다.
 
-현재 GT 라벨은 없다. 1차 평가를 위해 전체 데이터에 box/mask/class GT를 만들 필요는 없다. 소규모 원본·생성 쌍의 현실성과 의미 유지 여부를 사람이 판정한 평가 표본부터 준비한다. Qwen에게 다시 묻는 것만으로 품질을 검증하지 않는다.
+현재 GT 라벨은 없다. 1차 평가를 위해 전체 데이터에 box/mask/class GT를 만들 필요는 없다. 소규모 원본·생성 쌍의 현실성과 의미 유지 여부를 사람이 판정한 평가 표본부터 준비한다. CLIP 점수를 다시 재는 것만으로 품질을 검증하지 않는다.
 
 ## 2. 1차 파이프라인 지표
 
@@ -14,25 +14,25 @@
 completion_ratio = N_exported / N_target
 success = (N_exported == N_target and final_manifest_saved)
 generation_success_rate = N_generated / N_attempted
-physical_yes_rate = N_physical_yes / N_physical_valid_responses
-semantic_yes_rate = N_semantic_yes / N_semantic_valid_responses
-joint_accept_rate = N_both_yes / N_generated
+filter_accept_rate = N_clip_accepted / N_clip_judged
+rejected_by_sentence[k] = 문장 k의 delta가 max_delta를 넘은 후보 수
 export_yield = N_exported / N_attempted
 ```
 
-유효 응답 분모에는 해당 check의 YES/NO/UNCERTAIN을 포함하고 오류·not_run은 제외한다. semantic은 physical YES 후보에서만 수행하는 기본 구조이므로 **조건부 지표**임을 표시한다. 분모 0이면 null/N/A다. 오류율·불확실률도 check별로 따로 보고한다.
+`N_clip_judged`는 CLIP 판정이 완료된 후보이며 verification_error는 제외한다. 분모 0이면 null/N/A다. 오류율과 문장별 delta 분포(n, max, mean)를 따로 보고한다(`report.json`의 `clip_filter`).
 
-총 목표 N, 실제 고유 채택 수, NO/UNCERTAIN/기술 실패·중복 수, 원본별 채택 기여, source 보류 수, 사용자 중단 여부, 경과 시간, 후보당 생성/검증 시간, 목표 달성까지의 비용, peak VRAM을 기록한다. 중단된 실행의 일부 결과를 목표 달성으로 보고하지 않는다.
+총 목표 N, 실제 고유 채택 수, rejected/기술 실패·중복 수, 원본별 채택 기여, source 보류 수, 사용자 중단 여부, 경과 시간, 후보당 생성/검증 시간, 목표 달성까지의 비용, peak VRAM을 기록한다. 중단된 실행의 일부 결과를 목표 달성으로 보고하지 않는다.
 
 정상 실행에는 총 시도/시간 제한이 없다. 성능 벤치마크나 CI에서 별도 관측 종료 시점을 두면 평가 절차의 중단임을 명시하고 production 설정에 숨겨 넣지 않는다. 낮은 수락률의 원본이 덜 기여하는 분포 변화도 보고한다.
 
 ## 3. 현실성과 의미 보존의 독립 검수
 
-검수자는 Qwen 판정을 모르는 상태에서 원본·후보를 보고 두 항목을 별도로 평가한다. 산업 결함·사고와 희귀 생물 각각의 실패 사례를 포함한다.
+검수자는 CLIP 판정을 모르는 상태에서 원본·후보를 보고 아래 항목을 별도로 평가한다. T026 이후 의미 보존은 자동 검사하지 않으므로 이 사람 평가(또는 선택적 사람 검수)가 유일한 근거다. 국소 미세 artifact(무늬 소실·작은 질감 흔적·경계 자국)는 필터 범위 밖이므로 장면 수준 위배와 따로 집계한다. 산업 결함·사고와 희귀 생물 각각의 실패 사례를 포함한다.
 
 | 검수 항목 | 예시 |
 | --- | --- |
-| 현실성·물리적 개연성 | 불가능한 접촉·구조·재질 변형이 생겼는가 |
+| 장면 수준 물리 위배 | 공중에 뜬 물체, 땅·벽에 박힌 몸, 다리 개수 이상, 녹거나 부푼 몸체 등 명백한 위배가 생겼는가(필터 대상) |
+| 국소 미세 artifact | 무늬 소실, 작은 질감 흔적, 경계 자국(필터 범위 밖, 별도 집계) |
 | 사고 의미 | 충돌/전도 등 핵심 사건이 유지되는가; 정상 주차로 바뀌지 않았는가 |
 | 결함 의미 | 결함이 제거되거나 다른 결함 유형으로 바뀌지 않았는가 |
 | 생물 정체성 | 구별 특징이 유지되는가; 다른 생물처럼 바뀌지 않았는가 |
@@ -41,33 +41,44 @@ export_yield = N_exported / N_attempted
 
 정확한 결함 종류나 종 식별처럼 전문 지식이 필요하면 독립 전문가 또는 확인 가능한 메타데이터로 검수한다. 사람도 판단할 수 없으면 uncertain으로 두며 임의의 정답 NO로 바꾸지 않는다. 원본 자동 profile의 오류도 별도 분석한다.
 
-주요 품질 지표는 채택 이미지의 공동 적합률(두 조건 모두 충족), 물리 오수락률, 의미 변경 오수락률, 적절한 희소 이미지의 오배제율이다. sample 수와 검수 불확실률을 같이 보고한다. 층화 표본이면 추출 확률과 가중치를 기록한다.
+주요 품질 지표는 채택 이미지의 장면 수준 위배 오수락률, 정상 편집의 오탈락률(rejected 중 사람이 정상으로 본 비율, 탈락 이미지 보관 run에서만), 의미 변경 비율, 적절한 희소 이미지의 오배제율이다. sample 수와 검수 불확실률을 같이 보고한다. 층화 표본이면 추출 확률과 가중치를 기록한다.
 
 exact duplicate는 출력에서 제외한다. near-duplicate와 변화량은 먼저 분석 지표로 사용하며 threshold를 사후 변경해 결과를 좋게 보이지 않는다. 작은 변화만 반복하여 N을 쉽게 채우는 현상을 실패 분석에 포함한다.
 
-## 4. VQA 구성의 효과 분리
+## 4. CLIP 필터 보정과 효과 분리
 
-추가 검증 질문이 유용한지 보려면 동일한 **고정 후보 pool**에서 아래 필터를 비교한다.
+### 4.1 `max_delta`·문장 목록 보정 (GPU 작업, 미실행)
+
+목적은 **장면 수준 위배 검출**과 **정상 편집 오탐 최소화**다. 국소 미세 artifact를 잡도록 margin을 낮추지 않는다.
+
+1. 원본 대 원본 대조(잡음 바닥): 같은 원본의 재인코딩·리사이즈와 같은 대상을 찍은 다른 정상 사진 쌍에서 문장별 delta 분포를 잰다. 정상 변화만으로도 이 정도는 오른다는 기준이다.
+2. 정상 편집 표본: 기존 원본 9장(`assets/`)과 사람이 정상으로 본 채택 이미지(기존 run의 채택 3장 포함)의 문장별 delta. 이 상위 분위수가 오탐 경계다.
+3. 위배 표본: 탈락 이미지를 보관하는 연구 run(`storage.delete_rejected_images: false`)이나 사람이 고른 명백한 위배 후보(공중 부양·매몰·다리 개수 이상 등)의 문장별 delta.
+4. `max_delta`는 2의 오탐률을 사전에 정한 상한(예: 5%) 아래로 두면서 3을 가장 많이 거르는 값으로 정하고, 문장별로 거의 항상 걸리거나 전혀 반응하지 않는 문장은 문장 파일 새 버전(`implausible_physics_v2.txt`)에서 고친다. 보정에 쓴 표본은 이후 평가 표본과 분리한다.
+5. 산업 고장 원본 오탐 점검(T026 QA L3): v1의 "a machine part hovering in the air, detached from the machine"은 "detached from the machine"이 실제 고장(떨어져 나간 부품)과 겹칠 수 있다. 산업 고장·결함 원본과 그 정상 편집에서 이 문장의 delta 분포를 따로 보고, 오탐을 내면 v2에서 "detached" 표현을 빼거나 문장을 지운다. v1 목록은 보정 전까지 바꾸지 않는다.
+
+측정은 `scripts/clip_calibration.py`(`--pairs`의 라벨 붙은 쌍, `--from-runs`의 채택본)로 한다. 보정 결과를 같은 run에 적용하지 않는다. 문장·margin을 바꾸면 새 run이다.
+
+### 4.2 효과 분리
+
+필터가 유용한지 보려면 동일한 **고정 후보 pool**에서 아래 방식을 비교한다.
 
 | 비교군 | 후보 선택 |
 | --- | --- |
-| F0 | VQA 없음 |
-| F1 | 현실성·물리 검증만 |
-| F2 | 원본 의미 보존 검증만 |
-| F3 | 두 조건 모두 YES인 ADVV |
+| F0 | 필터 없음 |
+| F1 | CLIP 비현실 장면 필터(ADVV 기본) |
+| F2 | F1 + 사람 최종 검수 |
 
 각 방식으로 N장을 채우도록 독립 생성한 결과만 비교하면 시도 수와 후보 난이도가 달라져 필터 효과와 생성 예산이 섞인다. 필터 비교에는 고정 pool을 사용하고, production의 목표 수량 반복 성능은 별도로 측정한다.
 
-F2를 평가할 때는 physical 탈락 후보에도 semantic을 실행하는 **evaluation protocol**을 명시한다. production에서 skip된 semantic을 NO로 간주하거나 추정하여 채우지 않는다.
-
-기본 NO 삭제 정책으로는 탈락 이미지 검수가 불가능하다. 검수/ablation용 run은 사전에 `storage.delete_rejected_images=false`로 설정하여 별도 연구 공간에 보관한다. 기본 사용자 run의 NO 삭제 요구를 바꾸지 않으며, 이미 삭제된 후보를 완전히 복원할 수 있다고 주장하지 않는다.
+기본 rejected 삭제 정책으로는 탈락 이미지 검수가 불가능하다. 검수/ablation용 run은 사전에 `storage.delete_rejected_images=false`로 설정하여 별도 연구 공간에 보관한다. 기본 사용자 run의 rejected 삭제 요구를 바꾸지 않으며, 이미 삭제된 후보를 완전히 복원할 수 있다고 주장하지 않는다.
 
 ## 5. 2차 후속 성능 평가
 
-과제가 정해지면 원본-only, 일반 증강, DragFlow-only, 두 검증 ADVV, 같은 양의 무작위 후보 선택을 비교한다. 같은 후보 pool과 동등한 라벨 유효성 기준을 적용한다. 라벨 수량·원본/증강 비율·학습 step budget·seed·모델을 기록한다.
+과제가 정해지면 원본-only, 일반 증강, DragFlow-only, CLIP 필터 ADVV, 같은 양의 무작위 후보 선택을 비교한다. 같은 후보 pool과 동등한 라벨 유효성 기준을 적용한다. 라벨 수량·원본/증강 비율·학습 step budget·seed·모델을 기록한다.
 
-증강 전에 독립 group 단위 train/val/test를 고정한다. dataset-building으로 이미 만들어진 파생본도 원본과 같은 group에 두며, 최종 테스트는 가능한 한 독립적인 실제 이미지로 구성한다. 평가 데이터를 보고 verifier prompt·sampler를 조정하지 않는다.
+증강 전에 독립 group 단위 train/val/test를 고정한다. dataset-building으로 이미 만들어진 파생본도 원본과 같은 group에 두며, 최종 테스트는 가능한 한 독립적인 실제 이미지로 구성한다. 평가 데이터를 보고 CLIP 문장·margin·sampler를 조정하지 않는다.
 
-classification/detection/segmentation에 필요한 GT는 이 단계에서 작성·검수한다. 의미 YES만으로 classification label을 확정하거나 원본 box/mask를 그대로 복사하지 않는다. 주 지표와 absent-class 처리는 과제별로 사전에 고정한다.
+classification/detection/segmentation에 필요한 GT는 이 단계에서 작성·검수한다. 필터 통과만으로 classification label을 확정하거나 원본 box/mask를 그대로 복사하지 않는다. 주 지표와 absent-class 처리는 과제별로 사전에 고정한다.
 
-반복 seed별 결과와 불확실성을 보고하고, 데이터가 허용하면 group 단위 신뢰구간을 계산한다. Qwen fine-tuning은 domain 오류 분석 뒤 별도 학습/평가 split을 갖춘 선택적 연구로 둔다. 성능 향상이 없거나 품질이 떨어진 결과도 보존한다.
+반복 seed별 결과와 불확실성을 보고하고, 데이터가 허용하면 group 단위 신뢰구간을 계산한다. 모델 fine-tuning은 domain 오류 분석 뒤 별도 학습/평가 split을 갖춘 선택적 연구로 둔다. 성능 향상이 없거나 품질이 떨어진 결과도 보존한다.

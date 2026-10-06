@@ -1,4 +1,4 @@
-"""Final human pass/fail review after both Qwen checks; FAILs are discarded without regeneration."""
+"""Final human pass/fail review after the CLIP filter; FAILs are discarded without regeneration."""
 
 import io
 import json
@@ -22,7 +22,7 @@ def accepted_run(cfg, count=2, run_id="review", review=True):
     cfg["human_review"] = {"enabled": review}
     root = create_run(cfg, run_id, provenance="fake")
     colors = [(30, 40 + i, 50) for i in range(count)]
-    state = Pipeline(root, FakeBackend(["YES"] * (2 * count), colors)).run()
+    state = Pipeline(root, FakeBackend(None, colors)).run()
     assert state["status"] == "completed"
     return root
 
@@ -30,7 +30,7 @@ def accepted_run(cfg, count=2, run_id="review", review=True):
 def as_production(root):
     """Test-only: relabel fixture provenance so the production exporter can be exercised."""
     manifest = read_json(root / "manifest.json")
-    manifest["backend"] = "dragflow+qwen_local"
+    manifest["backend"] = "dragflow+qwen+clip_local"
     atomic_json(root / "manifest.json", manifest)
     for record in records_for(root):
         record["backend"] = manifest["backend"]
@@ -51,8 +51,8 @@ def test_pass_keeps_fail_discards_and_export_has_passed_only(cfg):
     assert not (root / f"visualizations/{cid}/comparison.png").exists()
     assert (root / f"visualizations/{cid}/drag_plan.png").is_file()
     assert (root / "review/current.png").is_file()
-    # Qwen's YES answers stay on record next to the human decision.
-    assert dropped["checks"]["semantic"]["response"]["answer"] == "YES"
+    # The CLIP filter judgment stays on record next to the human decision.
+    assert dropped["clip_filter"]["verdict"] == "accepted"
     as_production(root)
     rows = [json.loads(line) for line in export_run(root).read_text().splitlines()]
     assert [r["candidate_id"] for r in rows] == [kept["candidate_id"]]
@@ -84,7 +84,7 @@ def test_review_blocks_regeneration_by_resume(cfg):
     assert read_json(root / "state.json")["status"] == "completed"
 
 
-def test_review_requires_completed_qwen_stage(cfg):
+def test_review_requires_completed_automatic_stage(cfg):
     cfg["human_review"] = {"enabled": True}
     root = create_run(cfg, "unfinished", provenance="fake")
     with pytest.raises(DataError, match="completes"):
@@ -138,7 +138,7 @@ def test_arrow_keys(data, key):
         os.close(write_fd)
 
 
-def test_disabled_keeps_qwen_only_pipeline(cfg):
+def test_disabled_keeps_automatic_only_pipeline(cfg):
     assert cfg["human_review"] == {"enabled": False}  # Example config default.
     root = accepted_run(cfg, review=False)
     with pytest.raises(DataError, match="disabled"):

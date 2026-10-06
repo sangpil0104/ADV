@@ -36,7 +36,7 @@ from advv.sampler import (
     validate_plan,
 )
 from advv.storage import atomic_json, digest, file_hash, read_json, within
-from conftest import PROJECT, FakeBackend
+from conftest import PROJECT, REJECT, FakeBackend
 
 W, H = 120, 80
 
@@ -364,14 +364,14 @@ def test_v2_pipeline_records_region_and_footer(v2cfg):
 
 def test_v2_changed_proposals_block_resume(v2cfg):
     root, state = start_v2(
-        v2cfg, "v2_resume", FakeBackend(["NO"], [(1, 2, 3), KeyboardInterrupt()], subjects=["kitten", "box"])
+        v2cfg, "v2_resume", FakeBackend([REJECT], [(1, 2, 3), KeyboardInterrupt()], subjects=["kitten", "box"])
     )
     assert state["status"] == "interrupted"
     path = root / f"proposals/{sid(root)}/proposals.json"
     data = read_json(path)
     data["entities"][0]["score"] = 0.5
     atomic_json(path, data)
-    backend = FakeBackend(["YES", "YES"], subjects=["kitten", "box"])
+    backend = FakeBackend(subjects=["kitten", "box"])
     state = Pipeline(root, backend).run()
     assert state["status"] == "failed" and "Region proposals changed" in state["last_error"]["message"]
     assert backend.generations == []
@@ -502,7 +502,7 @@ def test_wide_entity_relocation_never_stalls(v2cfg, source, tmp_path):
         plan = sample_edit(source, {"summary": "s"}, cfg, index, tmp_path / "unit", proposals=proposals)
         assert plan.operation_params["displacement_pixels"][0] == 0
     colors = [(i, i, i) for i in range(1, 60)]
-    root, state = start_v2(cfg, "wide", FakeBackend(["YES"] * 80, colors, subjects=["pipe"]), WIDE)
+    root, state = start_v2(cfg, "wide", FakeBackend(None, colors, subjects=["pipe"]), WIDE)
     assert state["status"] == "completed" and state["accepted_count"] == 40
     assert "sampling_skipped" not in state
     for record in records_for(root):
@@ -531,12 +531,12 @@ def test_sampling_skip_advances_cursor_and_resumes(v2cfg, monkeypatch):
     cfg["run"]["target_count"] = 2
     subjects = ["kitten", "box"]
     root, state = start_v2(
-        cfg, "skip", FakeBackend(["YES"] * 2, [(1, 2, 3), KeyboardInterrupt()], subjects=subjects)
+        cfg, "skip", FakeBackend(None, [(1, 2, 3), KeyboardInterrupt()], subjects=subjects)
     )
     assert state["status"] == "interrupted" and calls == [0, 1, 2]
     assert state["sampling_skipped"][sid(root)] == {"attempts": [0], "consecutive": 0}
     calls.clear()
-    state = Pipeline(root, FakeBackend(["YES"] * 2, [(4, 5, 6)], subjects=subjects)).run()
+    state = Pipeline(root, FakeBackend(None, [(4, 5, 6)], subjects=subjects)).run()
     assert state["status"] == "completed" and state["accepted_count"] == 2 and calls == []
     assert [r["plan"]["attempt_index"] for r in records_for(root)] == [1, 2]
     assert read_json(root / "report.json")["sampling_skipped"][sid(root)]["attempts"] == [0]

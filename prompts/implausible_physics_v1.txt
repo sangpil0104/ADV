@@ -1,0 +1,32 @@
+# ADVV CLIP 필터 문장 목록 v1 — 사용자가 수정할 수 있는 초기값(미보정, 2026-10-06)
+#
+# 형식 규칙
+# - 한 줄에 영어 문장 하나. 앞뒤 공백은 지운다.
+# - '#'로 시작하는 줄과 빈 줄은 무시한다. 줄 중간의 '#'은 문장의 일부다(인라인 주석 없음).
+# - 같은 문장을 두 번 쓰면 설정 오류다. CLIP 텍스트 한도(77 token)를 넘는 문장은 worker가 거부한다.
+# - 문장 순서와 내용이 판정 identity다. 주석만 바꾸면 판정은 같지만, 문장을 바꾸면 새 run이 필요하다.
+#
+# 목적: "차가 하늘을 난다", "몸이 땅에 박혀 있다"처럼 장면 수준의 명백한 물리 위배만 거른다.
+# 무늬 소실·작은 질감 흔적·경계 자국 같은 국소 미세 artifact는 검사 대상이 아니다(필요하면 선택적 사람 검수).
+# 결함·손상·사고 자체는 물리 위배가 아니므로 그런 문장은 넣지 않는다.
+# 판정은 원본 대비 상승폭: 어떤 문장이라도 sim(후보) - sim(원본) > verifier.max_delta이면 탈락.
+#
+# 보정 대기 메모(T026 QA L3): "a machine part hovering in the air, detached from the machine"의
+# "detached from the machine"은 실제 산업 고장(떨어져 나간 부품)과 겹칠 수 있어 산업 고장 원본에서 오탐을 낼 수 있다.
+# v1 목록은 이미 정의됐으므로 여기서는 바꾸지 않는다. docs/EVALUATION.md §4.1 보정 결과를 보고 v2에서 유지·수정을 정한다.
+a car flying in the sky
+a person's body stuck into the ground
+a vehicle floating in the air above the road
+a heavy object floating in mid-air without any support
+an animal floating in the air
+a person floating in the air
+an animal's body sunk halfway into the solid ground
+a vehicle half buried in solid pavement
+an object passing through a solid wall
+a building tilted and hovering above the ground
+a machine part hovering in the air, detached from the machine
+an animal with too many legs
+a person with three legs
+an animal with a grotesquely swollen, melted body
+a car melted like liquid
+a body twisted into an impossible shape

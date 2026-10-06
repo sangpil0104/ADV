@@ -6,12 +6,14 @@ from ..storage import digest, load_rgb
 
 
 class Qwen:
+    """Source profile only (T026: Qwen no longer judges candidates)."""
+
     def __init__(self, cfg):
         import torch
         import transformers
         from transformers import AutoProcessor, Qwen3_5ForConditionalGeneration
 
-        self.torch, self.cfg = torch, cfg["verifier"]
+        self.torch, self.cfg = torch, cfg["profiler"]
         self.version = transformers.__version__
         self.processor = AutoProcessor.from_pretrained(self.cfg["model_path"], local_files_only=True)
         self.model = Qwen3_5ForConditionalGeneration.from_pretrained(

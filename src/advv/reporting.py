@@ -6,12 +6,14 @@ from collections import Counter
 from pathlib import Path
 
 from .backends.dragflow_speedups import parse_speedups, speedup_record
+from .backends.process import LocalBackend
+from .config import require_clip_run
 from .errors import DataError
 from .human_review import PASS
 from .human_review import enabled as human_review_enabled
 from .human_review import summary as human_summary
 from .storage import atomic_bytes, atomic_json, file_hash, pixel_hash, read_json, within
-from .verifiers.decision import decide
+from .verifiers.clip_filter import check_frozen, decide, frozen_sentences, frozen_source
 
 
 def records_for(run_dir):
@@ -28,16 +30,29 @@ def export_speedups(record: dict, configured: dict[str, bool]) -> dict:
     }
 
 
-def export_run(run_dir: Path) -> Path:
-    import json
+def export_filter(record: dict) -> dict:
+    """Per-row CLIP filter record: every sentence's source/candidate score and delta, plus identity."""
+    f = record["clip_filter"]
+    keys = ("verdict", "limit", "top", "similarity", "criterion", "model_id", "model_revision")
+    return {
+        **{k: f[k] for k in keys},
+        "sentences_sha256": f["sentences_sha256"],
+        "sentences_file_sha256": f["sentences_file_sha256"],
+        "sentences": [{k: r[k] for k in ("text", "source", "candidate", "delta")} for r in f["sentences"]],
+    }
 
+
+def export_run(run_dir: Path) -> Path:
     manifest = read_json(run_dir / "manifest.json")
-    if manifest["backend"] != "dragflow+qwen_local":
+    cfg = read_json(run_dir / "config.json")
+    require_clip_run(cfg)
+    if manifest["backend"] != LocalBackend.provenance:
         raise DataError("Production export refuses fake or unrecognized backends")
     sources = {s["source_id"]: s for s in read_json(run_dir / "sources.json")}
-    cfg = read_json(run_dir / "config.json")
     review = human_review_enabled(cfg)
     configured = parse_speedups(cfg["generator"].get("speedups"))
+    sentences = cfg["_assets"]["implausible_sentences"]
+    frozen_sentences(run_dir, sentences, cfg["_assets"]["implausible_sentences_sha256"])
     seen = {s["pixel_sha256"] for s in sources.values()}
     rows = []
     for r in records_for(run_dir):
@@ -49,10 +64,13 @@ def export_run(run_dir: Path) -> Path:
         source = sources[r["source_id"]]
         if (
             r["backend"] != manifest["backend"]
-            or decide(r["checks"]) != "accepted"
+            or decide(r) != "accepted"
+            or r["clip_filter"]["limit"] != cfg["verifier"]["max_delta"]
+            or r["clip_filter"]["sentences_sha256"] != cfg["_assets"]["implausible_sentences_sha256"]
             or source["split"] not in ("source", "train")
         ):
             raise DataError("Ineligible record in export")
+        check_frozen(r, sentences, frozen_source(run_dir, r["source_id"]))
         path = within(run_dir, r["image_path"], must_exist=True)
         pixels = pixel_hash(path)
         if (
@@ -79,6 +97,7 @@ def export_run(run_dir: Path) -> Path:
                 "file_sha256": r["file_sha256"],
                 "backend": r["backend"],
                 "generator_speedups": export_speedups(r, configured),
+                "clip_filter": export_filter(r),
                 "record_path": f"records/{r['candidate_id']}.json",
                 "human_review": r.get("human_review"),
                 "visualization_artifacts": r.get("visualization", {}).get("artifacts", {}),
@@ -87,6 +106,37 @@ def export_run(run_dir: Path) -> Path:
     destination = run_dir / "exports/images.jsonl"
     atomic_bytes(destination, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows).encode())
     return destination
+
+
+def filter_statistics(records: list[dict], cfg: dict) -> dict:
+    """Which sentences reject candidates, and how far each sentence rises over its source."""
+    judged = [r["clip_filter"] for r in records if r.get("clip_filter")]
+    rejected = [f for f in judged if f["verdict"] == "rejected"]
+    deltas: dict[str, list[float]] = {t: [] for t in cfg["_assets"]["implausible_sentences"]}
+    for f in judged:
+        for row in f["sentences"]:
+            deltas.setdefault(row["text"], []).append(row["delta"])
+    v = cfg["verifier"]
+    return {
+        "model_id": v["model_id"],
+        "model_revision": v["model_revision"],
+        "similarity": v["similarity"],
+        "criterion": v["criterion"],
+        "limit": v["max_delta"],
+        "sentences_sha256": cfg["_assets"]["implausible_sentences_sha256"],
+        "sentences_file_sha256": cfg["_assets"]["implausible_sentences_file_sha256"],
+        "judged": len(judged),
+        "rejected": len(rejected),
+        # A candidate rejected by several sentences counts once for each of them.
+        "rejected_by_sentence": dict(
+            Counter(f["sentences"][i]["text"] for f in rejected for i in f["exceeded"]).most_common()
+        ),
+        "top_sentence_of_rejected": dict(Counter(f["top"]["text"] for f in rejected).most_common()),
+        "delta_by_sentence": {
+            text: {"n": len(values), "max": max(values), "mean": sum(values) / len(values)} if values else {"n": 0}
+            for text, values in deltas.items()
+        },
+    }
 
 
 def report_run(run_dir: Path, *, final_status=None) -> Path:
@@ -104,17 +154,8 @@ def report_run(run_dir: Path, *, final_status=None) -> Path:
             "accepted": sum(r.get("export_status") == "eligible" for r in subset),
         }
     accepted = sum(r.get("export_status") == "eligible" for r in records)
-    physical_no = sum(
-        r.get("checks", {}).get("physical", {}).get("response", {}).get("answer") == "NO"
-        for r in records
-        if r.get("checks", {}).get("physical", {}).get("response")
-    )
-    semantic_no = sum(
-        r.get("checks", {}).get("semantic", {}).get("response", {}).get("answer") == "NO"
-        for r in records
-        if r.get("checks", {}).get("semantic", {}).get("response")
-    )
     cfg = read_json(run_dir / "config.json")
+    require_clip_run(cfg)
     review = human_review_enabled(cfg)
     result = {
         "run_id": run_dir.name,
@@ -124,8 +165,7 @@ def report_run(run_dir: Path, *, final_status=None) -> Path:
         "target": cfg["run"]["target_count"],
         "attempts": len(records),
         "status_counts": counts,
-        "physical_no": physical_no,
-        "semantic_no": semantic_no,
+        "clip_filter": filter_statistics(records, cfg),
         "duplicates": sum(r.get("export_status") == "duplicate" for r in records),
         "human_review": {"enabled": review, **(human_summary(records) if review else {})},
         "generator_speedups": speedup_record(parse_speedups(cfg["generator"].get("speedups"))),
@@ -142,31 +182,26 @@ def report_run(run_dir: Path, *, final_status=None) -> Path:
         ],
     }
     profiles = [read_json(p) for p in (run_dir / "profiles").glob("*.json")]
+    references = [read_json(p) for p in sorted((run_dir / "clip").rglob("*.json")) if "_receipts" not in str(p.relative_to(run_dir))]
     stage_seconds = {
         "generation": sum(
             a.get("elapsed_seconds", 0) for r in records for a in r.get("generation_attempts", [])
         )
     }
-    for stage, owners in [("profile", profiles), ("physical", records), ("semantic", records)]:
+    for stage, owners in [("profile", profiles), ("clip_reference", references), ("clip", records)]:
         stage_seconds[stage] = sum(
             a.get("elapsed_seconds", 0)
             for owner in owners
-            for a in owner.get("checks", {}).get(stage, {}).get("attempts", [])
+            for check in owner.get("checks", {}).values()
+            for a in check.get("attempts", [])
         )
     result["stage_elapsed_seconds"] = stage_seconds
     result["peak_vram_bytes"] = {
         "generator_max_single_logical_device": max(
             [v for r in records for v in r.get("generation_info", {}).get("peak_vram_bytes", [])] or [0]
         ),
-        "qwen_max_single_logical_device": max(
-            [
-                a.get("info", {}).get("peak_vram_bytes", 0)
-                for owner in records + profiles
-                for c in owner.get("checks", {}).values()
-                for a in c.get("attempts", [])
-            ]
-            or [0]
-        ),
+        "qwen_max_single_logical_device": peak(profiles),
+        "clip_max_single_logical_device": peak(records + references),
     }
     atomic_json(run_dir / "report.json", result)
     lines = [
@@ -190,13 +225,16 @@ def report_run(run_dir: Path, *, final_status=None) -> Path:
             "Human review: pass {pass} / fail {fail} / pending {pending}. "
             "Export contains human-passed images only.".format(**result["human_review"])
             if review
-            else "Human review: disabled. Export contains Qwen-accepted images."
+            else "Human review: disabled. Export contains CLIP-filter-accepted images."
         ),
         "",
-        "Qwen judgments are visual estimates, not physical proof or supervised ground truth.",
+        filter_lines(result["clip_filter"]),
         "",
-        "| Candidate | Final status | Export | Human | Preview |",
-        "| --- | --- | --- | --- | --- |",
+        "CLIP similarities are visual-text estimates, not physical proof or supervised ground truth. "
+        "Fine local artifacts are outside this filter.",
+        "",
+        "| Candidate | Final status | Top delta | Export | Human | Preview |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
     for record in records:
         links = []
@@ -204,7 +242,8 @@ def report_run(run_dir: Path, *, final_status=None) -> Path:
             if within(run_dir, relative).is_file():
                 links.append(f"[{name}]({relative})")
         lines.append(
-            f"| {html.escape(record['candidate_id'])} | {record['status']} | {record.get('export_status', 'pending')} "
+            f"| {html.escape(record['candidate_id'])} | {record['status']} | {top_delta(record)} "
+            f"| {record.get('export_status', 'pending')} "
             f"| {record.get('human_review', {}).get('decision', '-')} | {' / '.join(links)} |"
         )
     if state.get("last_error"):
@@ -212,6 +251,35 @@ def report_run(run_dir: Path, *, final_status=None) -> Path:
     path = run_dir / "report.md"
     atomic_bytes(path, ("\n".join(lines) + "\n").encode())
     return path
+
+
+def peak(owners: list[dict]) -> int:
+    return max(
+        [
+            (a.get("info") or {}).get("peak_vram_bytes", 0)
+            for owner in owners
+            for c in owner.get("checks", {}).values()
+            for a in c.get("attempts", [])
+        ]
+        or [0]
+    )
+
+
+def top_delta(record: dict) -> str:
+    f = record.get("clip_filter")
+    return f"{f['top']['delta']:+.3f}" if f else "-"
+
+
+def filter_lines(stats: dict) -> str:
+    lines = [
+        f"CLIP filter: `{stats['model_id']}@{stats['model_revision']}`, {stats['similarity']} similarity; "
+        f"rejected when any sentence rises over the source by more than {stats['limit']} "
+        f"(sentences `{stats['sentences_sha256'][:12]}`). Judged {stats['judged']}, rejected {stats['rejected']}.",
+    ]
+    if stats["rejected_by_sentence"]:
+        lines += ["", "| Rejecting sentence | Candidates |", "| --- | --- |"]
+        lines += [f"| {html.escape(t)} | {n} |" for t, n in stats["rejected_by_sentence"].items()]
+    return "\n".join(lines)
 
 
 def speedup_line(record: dict) -> str:

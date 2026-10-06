@@ -15,8 +15,8 @@
 │ start_point   end_point      │                              │
 └──────────────────────────────┴──────────────────────────────┘
 ID / operation / seed / start(x,y) / end(x,y) / area(px,%)
-Physical: YES·NO·UNCERTAIN·PENDING·ERROR·NOT_RUN
-Semantic: YES·NO·UNCERTAIN·PENDING·ERROR·NOT_RUN / final status
+CLIP filter: ACCEPTED·REJECTED | max delta +0.012 vs limit 0.030 | "<최대 delta 문장>" (+k more over limit)
+CLIP filter: ERROR·PENDING·NOT RUN | final status        # 판정 수치가 없을 때
 ```
 
 이미지는 두 패널에 같은 배율로 표시하고 종횡비를 유지한다. 캡션·좌표·범례·상태는 이미지 바깥 여백에 두어 내용을 가리지 않는다. 긴 ID나 문장은 줄바꿈하며 바깥으로 잘라내지 않는다. 축소는 미리보기 크기에만 적용하고 원본·생성 파일은 변경하지 않는다.
@@ -39,7 +39,7 @@ Semantic: YES·NO·UNCERTAIN·PENDING·ERROR·NOT_RUN / final status
 
 좌표는 EXIF 방향 정규화 후 원본의 좌상단을 원점으로 하는 `[x,y]`다. backend의 리사이즈·패딩·양자화된 좌표/영역을 정규화 원본으로 역변환한 뒤, 미리보기 패널의 배율과 여백 offset을 적용한다. mask는 nearest-neighbor로 변환하고 반투명 채움은 그 이후 수행한다. 화면상 좌표와 footer 수치는 서로 다른 단위가 되지 않도록 footer에는 **정규화 원본 px**라고 명시한다.
 
-`metadata.json`에 최소한 source/candidate/plan ID와 hash, 정규화 원본 크기, backend 입력 크기, 요청 좌표·mask hash, 실제 전달 좌표·mask hash, 전처리/역변환, 표시 좌표, 면적과 계산 좌표계, seed, operation, 두 VQA 상태, 렌더링 버전·설정 hash·파일 경로를 남긴다. 요청값과 실제값이 다르면 그 사실과 두 값을 footer 또는 보조 설명에 함께 표시한다.
+`metadata.json`에 최소한 source/candidate/plan ID와 hash, 정규화 원본 크기, backend 입력 크기, 요청 좌표·mask hash, 실제 전달 좌표·mask hash, 전처리/역변환, 표시 좌표, 면적과 계산 좌표계, seed, operation, CLIP 필터 요약(`clip_filter`: 판정·limit·최대 delta 문장·초과 문장), 렌더링 버전·설정 hash·파일 경로를 남긴다. 요청값과 실제값이 다르면 그 사실과 두 값을 footer 또는 보조 설명에 함께 표시한다.
 
 `object_region_v2` 계획은 footer에 `region=<entity|part> | phrase=<명사구> | proposal=<ID>` 줄과 `S = mask centroid, the start DragFlow drags from | contour select=(x, y)` 줄을 추가한다. 값은 저장된 계획의 `region_*` 필드이며 metadata의 `requested`에도 그대로 남는다. S 표시는 두 sampler 모두 `source_point`, 즉 upstream이 실제로 드래그를 시작하는 mask centroid다. 오목한 mask에서는 S가 파란 영역 밖에 찍힐 수 있으며, 윤곽 선택용 점은 footer에만 적는다. v1 계획에는 두 줄이 없다.
 
@@ -54,7 +54,7 @@ runs/<run_id>/visualizations/<candidate_id>/
 └── metadata.json     # 좌표·mask·전처리·판정·렌더링 상태
 ```
 
-계획 저장 후 요청값 기준 preview를 만들 수 있다. 실제 backend 입력이 확정되면 drag_plan을 갱신하고, 정상 생성 후 comparison을 저장한다. 아직 VQA를 실행하지 않았으면 `PENDING`, 선행 탈락으로 건너뛴 검증은 `NOT_RUN`이다. 최종 판정 후 동일 후보의 footer와 metadata만 원자적으로 갱신한다.
+계획 저장 후 요청값 기준 preview를 만들 수 있다. 실제 backend 입력이 확정되면 drag_plan을 갱신하고, 정상 생성 후 comparison을 저장한다. 아직 CLIP 필터를 실행하지 않았으면 `PENDING`, 생성 실패로 필터를 실행하지 않은 후보는 `NOT RUN`, 기술 오류는 `ERROR`다(T026 이전의 Physical/Semantic 두 줄은 CLIP 한 줄로 바뀌었다). footer에는 최대 delta 문장 하나와 limit, 초과 문장이 더 있으면 그 개수를 적는다. 전체 문장별 점수는 `metadata.json`의 `clip_filter` 요약과 record에 있다. 최종 판정 후 동일 후보의 footer와 metadata만 원자적으로 갱신한다.
 
 시각화는 원본·생성 이미지를 복사하여 그린다. **모델 입력과 dataset export는 표시 없는 파일**을 참조한다. visualization 경로는 별도 artifact 링크로만 기록하고 학습 manifest의 `image_path`나 hash·중복 검사·목표 N에 섞지 않는다. report에서 candidate ID별 확인용 파일 링크를 제공한다.
 
@@ -63,22 +63,22 @@ runs/<run_id>/visualizations/<candidate_id>/
 | 상태 | 원본 설정 PNG | 생성 결과 포함 comparison PNG |
 | --- | --- | --- |
 | accepted | 보존 | 보존 |
-| uncertain / 검증 오류 | 보존 | 해당 후보 이미지 보관 정책에 따라 보존 |
-| rejected, 기본 NO 삭제 활성 | 보존 | 삭제; 썸네일·임시 복사본도 함께 삭제 |
+| 검증 오류 | 보존 | 해당 후보 이미지 보관 정책에 따라 보존 |
+| rejected, 기본 rejected 삭제 활성 | 보존 | 삭제; 썸네일·임시 복사본도 함께 삭제 |
 | rejected, 명시적 연구용 이미지 보관 | 보존 | 보존 가능; REJECTED 표시 |
 | 생성 실패, 후보 없음 | 요청값 preview와 실패 상태 보존 | 생성하지 않음 |
 
-`visualization.rejected_comparison_policy=follow_image_retention`으로 기존 생성 이미지 보관 정책을 따른다. 원본 설정 PNG에는 후보의 픽셀을 포함하지 않으므로 NO 삭제 후에도 실패한 설정을 볼 수 있다. 삭제한 comparison을 재개/리포트 생성 때 복원하거나 dangling 링크를 남기지 않는다.
+`visualization.rejected_comparison_policy=follow_image_retention`으로 기존 생성 이미지 보관 정책을 따른다. 원본 설정 PNG에는 후보의 픽셀을 포함하지 않으므로 rejected 삭제 후에도 실패한 설정을 볼 수 있다. 삭제한 comparison을 재개/리포트 생성 때 복원하거나 dangling 링크를 남기지 않는다.
 
-렌더링 실패는 `visualization_error`로 별도 기록하고 원본·후보·VQA 판정은 보존한다. 시각화 복구를 위해 DragFlow나 Qwen을 다시 실행하지 않는다. 기본 활성화 상태에서는 필요한 시각화 저장까지 완료해야 run 완료로 보고하며, 이미 채운 N장을 추가로 생성하지 않는다.
+렌더링 실패는 `visualization_error`로 별도 기록하고 원본·후보·CLIP 판정은 보존한다. 시각화 복구를 위해 DragFlow나 CLIP을 다시 실행하지 않는다. 기본 활성화 상태에서는 필요한 시각화 저장까지 완료해야 run 완료로 보고하며, 이미 채운 N장을 추가로 생성하지 않는다.
 
 ## 5. 구현 시 확인 사항
 
 - 직사각형 이미지, EXIF 회전, 패딩·리사이즈, 가장자리 좌표에서 점·mask가 같은 위치를 가리키는지 확인한다.
 - backend 좌표 반올림 후에도 실제 전달값을 표시하고 mask 면적 계산의 좌표계를 기록한다.
 - 가까운 start/end, 작은 area, anchor가 있는 회전·변형의 표시가 읽히는지 확인한다.
-- 원본·후보 hash와 VQA 실제 입력이 렌더링 전후 동일한지 검사한다.
-- NO 삭제 후 comparison/thumbnail에 후보 픽셀이 남지 않고, source-only drag_plan은 유지되는지 검사한다.
+- 원본·후보 hash와 CLIP 실제 입력이 렌더링 전후 동일한지 검사한다.
+- rejected 삭제 후 comparison/thumbnail에 후보 픽셀이 남지 않고, source-only drag_plan은 유지되는지 검사한다.
 - 시각화만 실패한 뒤 재개해도 generation/verification 호출과 accepted count가 늘어나지 않는지 검사한다.
 
 고정 upstream의 deformation에는 독립적인 scale 입력이 없다. displacement로 설정하며 이를 scale 파라미터처럼 표시하지 않는다. 실제 feature 영역의 bilinear soft mask는 `effective_region.npy`, nonzero 영역을 원본 크기로 nearest 변환한 표시는 `effective_area.png`로 저장한다.

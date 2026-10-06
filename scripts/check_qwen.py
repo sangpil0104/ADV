@@ -1,4 +1,7 @@
-"""Real local Qwen integration probe; creates no augmented/exported data."""
+"""Real local Qwen source-profile probe; creates no augmented/exported data.
+
+Since T026 Qwen only writes source profiles; candidates are judged by the CLIP filter.
+"""
 
 import argparse
 from dataclasses import asdict
@@ -19,10 +22,10 @@ cfg = load_config(
     project / "configs/advv.example.yaml", input_dir=args.image.parent, target_count=1, gpus=args.gpus
 )
 lock = read_json(project / "models/weights.lock.json")["models"]["Qwen/Qwen3.5-4B"]
-cfg["verifier"].update(
+cfg["profiler"].update(
     model_path=lock["path"], model_revision=lock["revision"], processor_revision=lock["revision"]
 )
-cfg["execution"]["verifier_python"] = str(project / ".venv-qwen/bin/python")
+cfg["execution"]["profiler_python"] = str(project / ".venv-qwen/bin/python")
 root = args.output.resolve().parent
 root.mkdir(parents=True, exist_ok=True)
 atomic_json(root / "config.json", cfg)
@@ -50,7 +53,6 @@ for kind, images, prompt, schema, tokens in [
         cfg["_assets"]["profile_schema"],
         512,
     ),
-    ("physical", [args.image], cfg["_assets"]["physical_prompt"], cfg["_assets"]["vqa_schema"], 256),
 ]:
     result = model({"images": [str(p.resolve()) for p in images], "prompt": prompt, "max_new_tokens": tokens})
     results[kind] = result
@@ -60,18 +62,4 @@ for kind, images, prompt, schema, tokens in [
         result["parse_error"] = str(exc)
     atomic_json(args.output, results)
     print(kind, result["text"], flush=True)
-if results["profile"].get("parsed"):
-    import json
-
-    prompt = cfg["_assets"]["semantic_prompt"].replace(
-        "{{preservation_context}}", json.dumps(results["profile"]["parsed"])
-    )
-    result = model({"images": [str(args.image.resolve())] * 2, "prompt": prompt, "max_new_tokens": 256})
-    results["semantic_identity_control"] = result
-    try:
-        result["parsed"] = parse_response(result["text"], cfg["_assets"]["vqa_schema"])
-    except Exception as exc:
-        result["parse_error"] = str(exc)
-    atomic_json(args.output, results)
-    print("semantic_identity_control", result["text"], flush=True)
 backend.close()

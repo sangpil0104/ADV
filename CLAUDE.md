@@ -10,3 +10,4 @@
 | 날짜 | 변경 내용 | 대상 | 사유 |
 |------|----------|------|------|
 | 2026-09-30 | 초기 구성: researcher/implementer/qa/gpu-runner + orchestrator/rules/gpu-safety 스킬 | 전체 | 연속 질문 처리를 위한 하위 에이전트 분업 |
+| 2026-10-06 | advv-rules·orchestrator를 CLIP 필터 판정으로 갱신 | skills | 판정 방식 교체(T026) |

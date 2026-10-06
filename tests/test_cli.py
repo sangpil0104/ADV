@@ -8,7 +8,7 @@ import yaml
 from advv import cli
 from advv.reporting import records_for
 from advv.storage import read_json
-from conftest import FakeBackend
+from conftest import REJECT, FakeBackend
 
 
 @pytest.fixture(autouse=True)
@@ -30,7 +30,7 @@ def test_cli_total_count_and_resume(cfg, tmp_path, monkeypatch, quantity, target
             count = resolved["run"]["target_count"]
             # One NO and one pixel-identical source must not consume the accepted quota.
             super().__init__(
-                ["NO"] + ["YES"] * (2 * (count + 1)),
+                [REJECT],
                 [(10, 20, 30), "source"] + [(180, i + 1, 60) for i in range(count)],
             )
             instances.append(self)

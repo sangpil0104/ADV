@@ -1,5 +1,6 @@
 import copy
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from advv.config import load_config, validate_config
 from advv.contracts import Generated, RawResponse
 from advv.errors import BackendError
 from advv.storage import atomic_image, load_rgb, pixel_hash, within
+from advv.verifiers.clip_filter import load_sentences
 
 PROJECT = Path(__file__).resolve().parents[1]
 
@@ -41,15 +43,39 @@ def v2cfg(cfg):
     return cfg
 
 
+SOURCE_SIMILARITY = 0.15  # Fixture cosine of every source image with every sentence.
+REJECT = {0: 0.2}  # Candidate fixture: sentence 0 rises 0.2 over the source, far above max_delta.
+
+
+def unit_vector(sims):
+    """A unit vector whose cosine with text basis vector i is exactly sims[i]."""
+    rest = 1.0 - sum(x * x for x in sims)
+    assert rest > 0, "fixture similarities must fit in a unit vector"
+    return [*sims, math.sqrt(rest)]
+
+
 class FakeBackend:
-    """Test-only fixture. Production CLI has no fake mode."""
+    """Test-only fixture. Production CLI has no fake mode.
+
+    deltas: one entry per candidate CLIP call; None (default once exhausted) keeps every sentence at the
+    source similarity, {index: delta} raises sentences, "invalid" returns a wrong-dimension embedding, and an
+    exception is raised. Sentence i embeds as basis vector e_i, so similarities are exact fixtures.
+    """
 
     provenance = "fake"
 
     def __init__(
-        self, answers=None, colors=None, *, uncertain_source=False, subjects=None, parts=None, proposals=None
+        self,
+        deltas=None,
+        colors=None,
+        *,
+        uncertain_source=False,
+        subjects=None,
+        parts=None,
+        proposals=None,
+        sentence_count=None,
     ):
-        self.answers = list(answers or ["YES", "YES"])
+        self.deltas = list(deltas or [])
         self.colors = list(colors or [(200, 10, 30)])
         self.uncertain_source = uncertain_source
         self.subjects = subjects
@@ -58,31 +84,45 @@ class FakeBackend:
         self.proposal_calls = []
         self.generations = []
         self.calls = []
+        self.embeds = []
+        self.sentences = sentence_count or len(load_sentences(PROJECT / "prompts/implausible_physics_v1.txt"))
         self.closed = False
 
     def complete(self, images, prompt, max_new_tokens, *, receipt=None):
         self.calls.append(
             {"images": list(images), "hashes": [pixel_hash(p) for p in images], "prompt": prompt}
         )
-        if prompt.startswith("Inspect this original"):
-            profile = {
-                "summary": "A visibly cracked part.",
-                "must_preserve": ["visible crack"],
-                "uncertain": self.uncertain_source,
-            }
-            if self.subjects is not None:
-                profile["subjects"] = self.subjects
-                profile["parts"] = self.parts or []
-            return RawResponse(json.dumps(profile), {"backend": "fake"})
-        value = self.answers.pop(0)
-        if isinstance(value, BaseException):
-            raise value
-        if value.startswith("{") or value == "invalid":
-            return RawResponse(value, {"backend": "fake"})
-        return RawResponse(
-            json.dumps({"answer": value, "reason": "Fixture judgment, not a real visual assessment."}),
-            {"backend": "fake"},
-        )
+        profile = {
+            "summary": "A visibly cracked part.",
+            "must_preserve": ["visible crack"],
+            "uncertain": self.uncertain_source,
+        }
+        if self.subjects is not None:
+            profile["subjects"] = self.subjects
+            profile["parts"] = self.parts or []
+        return RawResponse(json.dumps(profile), {"backend": "fake"})
+
+    def embed(self, images, texts, *, receipt=None):
+        self.embeds.append({"images": list(images), "texts": list(texts), "receipt": receipt})
+        self.calls.append({"images": list(images), "texts": list(texts)})
+        n = self.sentences
+        if texts:
+            assert len(texts) == n
+            basis = [[float(i == j) for j in range(n + 1)] for i in range(n)]
+            return {"text_embeddings": basis, "image_embeddings": [], "info": {"backend": "fake"}}
+        vectors = []
+        for path in images:
+            sims = [SOURCE_SIMILARITY] * n
+            if "candidates" in Path(path).parts:
+                value = self.deltas.pop(0) if self.deltas else None
+                if isinstance(value, BaseException):
+                    raise value
+                if value == "invalid":
+                    return {"text_embeddings": [], "image_embeddings": [[1.0, 0.0]], "info": {}}
+                for index, delta in (value or {}).items():
+                    sims[index] += delta
+            vectors.append(unit_vector(sims))
+        return {"text_embeddings": [], "image_embeddings": vectors, "info": {"backend": "fake"}}
 
     def propose(self, source, subjects, parts, run_dir):
         self.proposal_calls.append((source.source_id, list(subjects), list(parts)))

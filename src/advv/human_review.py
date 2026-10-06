@@ -1,4 +1,4 @@
-"""Final human pass/fail review of Qwen-accepted images, driven by terminal arrow keys."""
+"""Final human pass/fail review of CLIP-filter-accepted images, driven by terminal arrow keys."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
+from .config import require_clip_run
 from .errors import DataError
 from .storage import atomic_image, atomic_json, delete_generated, file_hash, load_rgb, now, read_json, within
 
@@ -23,7 +24,7 @@ PANEL_SIDE = 768
 
 
 def enabled(cfg: dict) -> bool:
-    """Optional stage fixed per run; runs without the key keep the Qwen-only pipeline."""
+    """Optional stage fixed per run; runs without the key keep the automatic-only pipeline."""
     return bool(cfg.get("human_review", {}).get("enabled", False))
 
 
@@ -146,13 +147,15 @@ def terminal_decisions():
 
 
 def review_run(run_dir: Path, *, decisions=None, reviewer: str | None = None, out=sys.stdout) -> dict:
-    """Show each Qwen-accepted image once; LEFT keeps it, RIGHT discards it. No regeneration follows."""
+    """Show each CLIP-accepted image once; LEFT keeps it, RIGHT discards it. No regeneration follows."""
     run_dir = run_dir.resolve()
-    if not enabled(read_json(run_dir / "config.json")):
+    cfg = read_json(run_dir / "config.json")
+    require_clip_run(cfg)
+    if not enabled(cfg):
         raise DataError("Human review is disabled for this run; create a new run with --human-review")
     state = read_json(run_dir / "state.json")
     if state["status"] != "completed":
-        raise DataError("Human review starts after the Qwen stage completes; resume the run first")
+        raise DataError("Human review starts after the automatic stage completes; resume the run first")
     sources = {s["source_id"]: s for s in read_json(run_dir / "sources.json")}
     records = records_for(run_dir)
     for record in records:

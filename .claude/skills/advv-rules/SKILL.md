@@ -12,8 +12,8 @@ description: "ADVV 프로젝트에서 코드·문서·설정·테스트를 바�
 - `../komap/`은 읽지도 쓰지도 않는다.
 - `runs/`의 기존 run, `assets/` 원본, `models/`, `third_party/`의 upstream 파일을 덮어쓰거나 지우지 않는다. 새 실행은 새 `runs/<run_id>/`.
 - 실제 DragFlow를 affine warp·복사·다른 생성기로 대체하지 않는다. fake backend는 tests fixture 전용.
-- 판정은 파싱된 `answer == "YES"`만 인정한다. 문자열 포함 검색·정규식 부분 매칭 금지. NO/UNCERTAIN/파싱 실패/timeout/OOM은 서로 다른 결과.
-- 같은 이미지의 NO를 다시 묻지 않는다. 목표 수량을 위해 판정 기준을 완화하지 않는다.
+- 후보 판정은 CLIP 비현실 문장 필터다(2026-10-06 교체, Qwen VQA 판정 없음). 문장별 delta = sim(후보) − sim(원본)이 하나라도 `verifier.max_delta`를 넘으면 rejected. 판정 오류·timeout·OOM은 rejected와 다른 결과로 기록한다. Qwen은 원본 profile(subjects/parts)에만 쓴다.
+- 같은 후보를 다시 판정해 통과시키지 않는다. 목표 수량을 위해 문장 목록·`max_delta`를 run 중에 바꾸거나 완화하지 않는다. 국소 미세 artifact는 검사 범위 밖이다.
 - GPU는 `advv-gpu-safety` 스킬 절차 없이 쓰지 않는다. 다른 사용자의 GPU에는 절대 올리지 않는다.
 - 실행하지 않은 검사를 실행했다고 보고하지 않는다. 문서만 바꿨으면 "문서만"이라고 쓴다.
 
@@ -25,7 +25,7 @@ description: "ADVV 프로젝트에서 코드·문서·설정·테스트를 바�
 - 표준 logging, 타입 힌트, `errors.py`의 명시적 오류 유형. `except: pass` 금지.
 - 주변 코드의 밀도·명명·관용구에 맞춘다(주석은 적고, 이유가 비자명할 때만).
 - `src/advv/*.py`가 바뀌면 implementation hash가 바뀌어 기존 run은 `--resume`할 수 없다. 보고에 적는다.
-- DragFlow(torch 2.5.1/tf 4.48)와 Qwen(torch 2.6/tf 5.17) 환경은 합치지 않는다. 새 모델은 별도 venv.
+- DragFlow(torch 2.5.1/tf 4.48), Qwen·CLIP(.venv-qwen, torch 2.6/tf 5.17), SAM 3(.venv-sam3) 환경은 합치지 않는다. 새 모델은 별도 venv.
 
 ## 동작을 바꾸면 함께 갱신할 곳
 

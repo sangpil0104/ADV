@@ -10,9 +10,9 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-from .config import per_subject_parts, recipe_hash
+from .config import per_subject_parts, recipe_hash, require_clip_run
 from .contracts import EditRequest, Source
-from .errors import BackendError, DataError, FatalBackendError, ResponseError, SamplingSkipped
+from .errors import BackendError, ConfigError, DataError, FatalBackendError, ResponseError, SamplingSkipped
 from .ingest import scan_sources, snapshot_sources
 from .proposals import (
     build_proposals,
@@ -38,12 +38,23 @@ from .storage import (
     safe_id,
     within,
 )
-from .verifiers.decision import decide
+from .verifiers.clip_filter import (
+    CRITERION,
+    SIMILARITY,
+    check_frozen,
+    decide,
+    frozen_source,
+    judge,
+    load_sentences,
+    normalized,
+    similarities,
+)
 from .verifiers.parser import parse_response
 from .visualization import render
 
 LOG = logging.getLogger(__name__)
-TERMINAL = {"accepted", "rejected", "uncertain", "verification_error", "generation_error"}
+TERMINAL = {"accepted", "rejected", "verification_error", "generation_error"}
+CLIP_TEXTS = "clip/texts.json"
 
 
 def implementation_hash() -> str:
@@ -93,19 +104,6 @@ def create_run(cfg: dict, run_id: str, *, provenance: str) -> Path:
     return run_dir
 
 
-SEMANTIC_PROFILE_KEYS = ("summary", "must_preserve", "uncertain")
-
-
-def semantic_context(profile_response: dict, preserve_hint) -> str:
-    """{{preservation_context}} of the semantic VQA: only the preservation criteria of the frozen profile.
-
-    subjects/parts name regions for the proposal sampler and are not preservation requirements. The
-    profile's own key order is kept, so a profile with only these keys renders exactly as before.
-    """
-    criteria = {k: v for k, v in profile_response.items() if k in SEMANTIC_PROFILE_KEYS}
-    return json.dumps({"source_profile": criteria, "preserve_hint": preserve_hint}, ensure_ascii=False)
-
-
 def profile_parts_check(response: dict) -> None:
     """Cross-field rule a JSON schema cannot state: v4 parts entries name distinct profile subjects."""
     problem = subject_parts_error(response["parts"], response["subjects"])
@@ -118,6 +116,7 @@ class Pipeline:
         self.root = run_dir.resolve()
         self.cfg = read_json(self.root / "config.json")
         self.manifest = read_json(self.root / "manifest.json")
+        require_clip_run(self.cfg)
         if recipe_hash(self.cfg) != self.manifest["recipe_sha256"]:
             raise DataError("Run configuration changed; start a new run")
         if implementation_hash() != self.manifest["implementation_sha256"]:
@@ -129,6 +128,7 @@ class Pipeline:
             if pixel_hash(within(self.root, source.image_path, must_exist=True)) != source.pixel_sha256:
                 raise DataError(f"Input snapshot changed: {source.source_id}")
         self.by_id = {s.source_id: s for s in self.sources}
+        self.check_sentence_file()
         self.backend = backend
         if backend.provenance != self.manifest["backend"]:
             raise DataError("Backend provenance changed")
@@ -139,6 +139,8 @@ class Pipeline:
         )
         self.profiles = {}
         self.regions = {}
+        self.clip_sources = {}
+        self.text_embeddings = None
         self.seen = {s.pixel_sha256 for s in self.sources}
         self.accepted = []
 
@@ -150,22 +152,28 @@ class Pipeline:
         record["updated_at"] = now()
         atomic_json(self.root / f"records/{record['candidate_id']}.json", record)
 
-    def _complete(self, owner, check, images, prompt, schema, max_tokens, save, receipt_base, validate=None):
+    def check_sentence_file(self):
+        """The run is bound to its frozen sentence list; an edited file means a new run, not a resume."""
+        assets = self.cfg["_assets"]
+        try:
+            current = load_sentences(Path(self.cfg["verifier"]["sentences_path"]))
+        except (OSError, ConfigError) as exc:
+            raise DataError(f"Implausible sentence file is unreadable ({exc}); restore it or start a new run") from exc
+        if digest(current) != assets["implausible_sentences_sha256"] or current != assets["implausible_sentences"]:
+            raise DataError(
+                "Implausible sentence file changed since this run was created; restore it or start a new run"
+            )
+
+    def _checked(self, owner, check, identity, call, interpret, save, receipt_base):
+        """One model check with durable receipts and a bounded technical retry; a decision is never re-asked."""
         checks = owner.setdefault("checks", {})
         entry = checks.setdefault(check, {"status": "pending", "response": None, "attempts": []})
-        if entry["status"] in ("completed", "error", "not_run"):
+        if entry["status"] in ("completed", "error"):
             return entry
-        identity = {
-            "check": check,
-            "image_hashes_in_order": [pixel_hash(p) for p in images],
-            "prompt_hash": digest(prompt),
-            "verifier": self.cfg["verifier"],
-            "max_new_tokens": max_tokens,
-        }
         key = digest(identity)
         if entry.get("cache_key", key) != key:
             raise DataError("Verification inputs changed during resume")
-        entry.update(cache_key=key, prompt_sha256=digest(prompt), input_identity=identity)
+        entry.update(cache_key=key, input_identity=identity)
         max_attempts = 1 + self.cfg["execution"]["max_technical_retries"]
         while len(entry["attempts"]) < max_attempts or (
             entry["attempts"] and entry["attempts"][-1]["status"] == "pending"
@@ -182,22 +190,19 @@ class Pipeline:
             try:
                 path = within(self.root, receipt)
                 if path.exists():
-                    result = read_json(path)
-                    if not result["ok"]:
-                        cls = FatalBackendError if result["error"]["fatal"] else BackendError
-                        raise cls(result["error"]["message"])
-                    text, info = result["result"]["text"], result["result"]["info"]
+                    saved = read_json(path)
+                    if not saved["ok"]:
+                        cls = FatalBackendError if saved["error"]["fatal"] else BackendError
+                        raise cls(saved["error"]["message"])
+                    result = saved["result"]
                 else:
-                    response = self.backend.complete(images, prompt, max_tokens, receipt=receipt)
-                    text, info = response.text, response.info
+                    result = call(receipt)
                     # Test backends also have a durable receipt, never silently branded as real.
-                    atomic_json(path, {"ok": True, "result": {"text": text, "info": info}})
-                attempt.update(raw_completion=text, info=info)
-                parsed = parse_response(text, schema)
-                if validate:
-                    validate(parsed)
+                    atomic_json(path, {"ok": True, "result": result})
+                attempt["info"] = result.get("info")
+                response = interpret(result, attempt)
                 attempt.update(status="completed", elapsed_seconds=time.monotonic() - started)
-                entry.update(status="completed", response=parsed)
+                entry.update(status="completed", response=response)
                 save()
                 return entry
             except (ResponseError, BackendError, FatalBackendError) as exc:
@@ -215,6 +220,125 @@ class Pipeline:
         entry["status"] = "error"
         save()
         return entry
+
+    def _complete(self, owner, check, images, prompt, schema, max_tokens, save, receipt_base, validate=None):
+        identity = {
+            "check": check,
+            "image_hashes_in_order": [pixel_hash(p) for p in images],
+            "prompt_hash": digest(prompt),
+            "profiler": self.cfg["profiler"],
+            "max_new_tokens": max_tokens,
+        }
+
+        def call(receipt):
+            response = self.backend.complete(images, prompt, max_tokens, receipt=receipt)
+            return {"text": response.text, "info": response.info}
+
+        def interpret(result, attempt):
+            attempt["raw_completion"] = result["text"]
+            parsed = parse_response(result["text"], schema)
+            if validate:
+                validate(parsed)
+            return parsed
+
+        owner.setdefault("checks", {}).setdefault(check, {"status": "pending", "response": None, "attempts": []})
+        owner["checks"][check]["prompt_sha256"] = digest(prompt)
+        return self._checked(owner, check, identity, call, interpret, save, receipt_base)
+
+    def _embed_check(self, owner, check, images, texts, interpret, save, receipt_base):
+        v = self.cfg["verifier"]
+        identity = {
+            "check": check,
+            "image_hashes_in_order": [pixel_hash(p) for p in images],
+            "texts_sha256": digest(texts),
+            "model": {k: v[k] for k in ("backend", "model_id", "model_revision", "dtype", "preprocessing")},
+        }
+
+        def call(receipt):
+            return self.backend.embed(images, texts, receipt=receipt)
+
+        return self._checked(owner, check, identity, call, interpret, save, receipt_base)
+
+    def _reference(self, relative, owner, check, images, texts, interpret):
+        """A frozen CLIP reference (sentence texts or one source image), written once and reused on resume.
+
+        A technical failure stops the run (a missing reference is never a hold); resume retries it in a new
+        round so earlier error receipts stay on record and are not re-read as the new attempt's result.
+        """
+        path = within(self.root, relative)
+        owner = read_json(path) if path.exists() else owner
+        if owner.get("status") == "ready":
+            return owner
+        entry = owner.get("checks", {}).get(check)
+        if entry and entry["status"] == "error":
+            owner.setdefault("failed_checks", []).append(owner["checks"].pop(check))
+        rounds = len(owner.get("failed_checks", []))
+
+        def save():
+            atomic_json(path, owner)
+
+        base = f"{Path(relative).with_suffix('')}_receipts/round_{rounds}"
+        entry = self._embed_check(owner, check, images, texts, interpret, save, base)
+        if entry["status"] == "error":
+            raise DataError(
+                f"clip_reference_error: {relative} could not be computed ({entry['attempts'][-1].get('error')}); "
+                "inspect logs/clip.log and resume"
+            )
+        owner["status"] = "ready"
+        owner["frozen_sha256"] = digest(entry["response"])
+        save()
+        return owner
+
+    def prepare_clip(self):
+        """Embed the fixed sentences once per run and each eligible source once, before any candidate."""
+        v, assets = self.cfg["verifier"], self.cfg["_assets"]
+        sentences = assets["implausible_sentences"]
+        common = {
+            "model_id": v["model_id"],
+            "model_revision": v["model_revision"],
+            "sentences_sha256": assets["implausible_sentences_sha256"],
+        }
+
+        def text_response(result, attempt):
+            vectors = normalized(result["text_embeddings"], count=len(sentences))
+            return {"text_embeddings": vectors.tolist(), "dim": vectors.shape[1]}
+
+        texts = self._reference(
+            CLIP_TEXTS, {"schema_version": "1.0", **common, "sentences": sentences}, "texts", [], sentences, text_response
+        )
+        if any(texts[k] != common[k] for k in common) or texts["sentences"] != sentences:
+            raise DataError("Frozen CLIP sentence embeddings do not match this run; start a new run")
+        if texts["frozen_sha256"] != digest(texts["checks"]["texts"]["response"]):
+            raise DataError("Frozen CLIP sentence embeddings changed")
+        self.text_embeddings = normalized(
+            texts["checks"]["texts"]["response"]["text_embeddings"], count=len(sentences)
+        )
+        for source in self.eligible:
+            sid = source.source_id
+            ref = self._reference(
+                f"clip/sources/{safe_id(sid)}.json",
+                {"schema_version": "1.0", **common, "source_id": sid, "source_pixel_sha256": source.pixel_sha256},
+                "source",
+                [within(self.root, source.image_path)],
+                [],
+                self.image_response,
+            )
+            response = ref["checks"]["source"]["response"]
+            if (
+                any(ref[k] != common[k] for k in common)
+                or ref["source_pixel_sha256"] != source.pixel_sha256
+                or ref["frozen_sha256"] != digest(response)
+            ):
+                raise DataError(f"Frozen CLIP source reference changed for {sid}; start a new run")
+            self.clip_sources[sid] = response
+
+    def image_response(self, result, attempt):
+        vector = normalized(result["image_embeddings"], count=1, dim=self.text_embeddings.shape[1])[0]
+        return {
+            "image_embedding": vector.tolist(),
+            "image_embedding_sha256": digest(vector.tolist()),
+            "similarities": similarities(vector, self.text_embeddings),
+        }
 
     def profile_sources(self):
         assets = self.cfg["_assets"]
@@ -434,8 +558,15 @@ class Pipeline:
                 raise DataError("Stored edit plan changed")
             validate_plan(EditRequest(**record["plan"]), source, self.root)
             if record.get("export_status") == "eligible":
-                if decide(record["checks"]) != "accepted" or record["backend"] != self.manifest["backend"]:
+                if (
+                    decide(record) != "accepted"
+                    or record["backend"] != self.manifest["backend"]
+                    or record["clip_filter"]["limit"] != self.cfg["verifier"]["max_delta"]
+                ):
                     raise DataError("Invalid accepted record")
+                check_frozen(
+                    record, self.cfg["_assets"]["implausible_sentences"], frozen_source(self.root, record["source_id"])
+                )
                 path = within(self.root, record["image_path"], must_exist=True)
                 if file_hash(path) != record["file_sha256"] or pixel_hash(path) != record["pixel_sha256"]:
                     raise DataError(f"Accepted artifact changed: {record['candidate_id']}")
@@ -465,8 +596,6 @@ class Pipeline:
         cid = record["candidate_id"]
         if not record.get("finalized"):
             decision = record["status"]
-            for check in ("physical", "semantic"):
-                record["checks"].setdefault(check, {"status": "not_run", "response": None, "attempts": []})
             if decision == "accepted":
                 if record["pixel_sha256"] in self.seen:
                     record["export_status"] = "duplicate"
@@ -488,7 +617,6 @@ class Pipeline:
             settings = self.cfg["storage"]
             delete = (
                 (decision == "rejected" and settings["delete_rejected_images"])
-                or (decision == "uncertain" and not settings["keep_uncertain_images"])
                 or (
                     decision in ("verification_error", "generation_error")
                     and not settings["keep_error_images"]
@@ -592,40 +720,28 @@ class Pipeline:
         if pixel_hash(candidate) != record["pixel_sha256"]:
             raise DataError("Candidate changed during resume")
         self.visualize(record)
-        a = self.cfg["_assets"]
 
         def save():
             self.save_record(record)
 
-        receipt_base = f"candidates/{record['candidate_id']}/vqa"
+        def candidate_response(result, attempt):
+            response = self.image_response(result, attempt)
+            response.pop("image_embedding")  # Kept in the receipt; the record stays small.
+            return response
+
         try:
-            physical = self._complete(
+            entry = self._embed_check(
                 record,
-                "physical",
+                "clip",
                 [candidate],
-                a["physical_prompt"],
-                a["vqa_schema"],
-                self.cfg["verifier"]["max_new_tokens"],
+                [],
+                candidate_response,
                 save,
-                receipt_base,
+                f"candidates/{record['candidate_id']}/clip",
             )
-            if physical.get("response", {}) and physical["response"]["answer"] == "YES":
-                profile = self.profiles[source.source_id]
-                context = semantic_context(profile["response"], source.preserve_hint)
-                prompt = a["semantic_prompt"].replace("{{preservation_context}}", context)
-                self._complete(
-                    record,
-                    "semantic",
-                    [within(self.root, source.image_path), candidate],
-                    prompt,
-                    a["vqa_schema"],
-                    self.cfg["verifier"]["max_new_tokens"],
-                    save,
-                    receipt_base,
-                )
-            else:
-                record["checks"]["semantic"] = {"status": "not_run", "response": None, "attempts": []}
-            record["status"] = decide(record["checks"])
+            if entry["status"] == "completed":
+                record["clip_filter"] = self.clip_judgment(record["source_id"], entry["response"])
+            record["status"] = decide(record)
         except FatalBackendError:
             record["status"] = "verification_error"
             record["fatal"] = True
@@ -634,6 +750,26 @@ class Pipeline:
             raise
         self.save_record(record)
         self.finalize(record)
+
+    def clip_judgment(self, source_id: str, response: dict) -> dict:
+        v, assets = self.cfg["verifier"], self.cfg["_assets"]
+        result = judge(
+            assets["implausible_sentences"],
+            self.clip_sources[source_id]["similarities"],
+            response["similarities"],
+            v["max_delta"],
+        )
+        return {
+            **result,
+            "similarity": SIMILARITY,
+            "criterion": CRITERION,
+            "sentences_sha256": assets["implausible_sentences_sha256"],
+            "sentences_file_sha256": assets["implausible_sentences_file_sha256"],
+            "model_id": v["model_id"],
+            "model_revision": v["model_revision"],
+            "source_image_embedding_sha256": self.clip_sources[source_id]["image_embedding_sha256"],
+            "candidate_image_embedding_sha256": response["image_embedding_sha256"],
+        }
 
     def run(self):
         with run_lock(self.root):
@@ -651,7 +787,8 @@ class Pipeline:
                     "started_at": now(),
                     "selected_gpu_ids": self.gpu_ids,
                     "generator_gpu_ids": self.gpu_ids[:2] if self.gpu_ids else [],
-                    "verifier_gpu_ids": self.gpu_ids[:1] if self.gpu_ids else [],
+                    "profiler_gpu_ids": self.gpu_ids[:1] if self.gpu_ids else [],
+                    "clip_gpu_ids": self.gpu_ids[:1] if self.gpu_ids else [],
                     "proposal_gpu_ids": (
                         self.gpu_ids[:1]
                         if self.gpu_ids and self.cfg["sampler"]["version"] == "object_region_v2"
@@ -665,6 +802,7 @@ class Pipeline:
             try:
                 self.recover()
                 self.profile_sources()
+                self.prepare_clip()
                 # Reconstruct round-robin position from the last committed reservation.
                 if self.records:
                     order = [s.source_id for s in self.sources]
@@ -741,7 +879,6 @@ class Pipeline:
                         bar.set_postfix(
                             attempts=len(self.records),
                             rejected=counts["rejected"],
-                            uncertain=counts["uncertain"],
                             duplicates=sum(r.get("export_status") == "duplicate" for r in self.records),
                         )
                 if any(

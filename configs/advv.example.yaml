@@ -66,12 +66,13 @@ execution:
   mode: shared_gpus_sequential
   selected_gpu_ids: null               # 필수: 사용자가 실행 시 선택
   generator_python: null
-  verifier_python: null
+  profiler_python: null                # Qwen 원본 profile worker (../.venv-qwen/bin/python)
+  clip_python: null                    # CLIP 필터 worker. transformers CLIPModel이 있는 .venv-qwen 권장
   proposal_python: null                # object_region_v2 전용: SAM 3 proposal worker (../.venv-sam3/bin/python)
   candidate_concurrency: 1
   worker_timeout_seconds: 1800         # 개별 작업 timeout 예시; 총 실행 상한 아님
   max_technical_retries: 1
-  max_consecutive_technical_failures: 3  # 정상 NO/UNCERTAIN은 해당하지 않는 기술 장애 중단 기준
+  max_consecutive_technical_failures: 3  # 정상 rejected는 해당하지 않는 기술 장애 중단 기준
   retry_oom: false
 
 region_proposal:                       # object_region_v2 전용. 임계값은 모두 미검증 초기값
@@ -113,7 +114,7 @@ generator:
     tf32: false                        # 정밀도 변형(결과 달라짐): fp32 matmul을 TF32로
   # 모두 GPU 미측정(T017). 켠 플래그는 generation_info·config.json·report에 기록된다. docs/ARCHITECTURE.md 참조
 
-verifier:
+profiler:                              # Qwen: 원본 profile(subjects/parts 추출) 전용. 후보 판정에는 쓰지 않는다(T026)
   backend: qwen_multimodal_local
   model_id: Qwen/Qwen3.5-4B
   model_path: null                     # 다운로드한 로컬 모델 디렉터리
@@ -125,28 +126,30 @@ verifier:
   batch_size: 1
   enable_thinking: false
   do_sample: false
-  max_new_tokens: 256                  # 각 VQA 호출 기준
-  physical_prompt_path: ../prompts/physical_plausibility_v1.txt
-  semantic_prompt_path: ../prompts/semantic_preservation_v1.txt
-  response_schema: ../schemas/vqa_response.schema.json
-  check_order: [physical, semantic]
-  semantic_only_after_physical_yes: true
   preprocessing:
     policy: pinned_processor_defaults
   quantization: null
 
-decision:
-  require_all_yes: [physical, semantic]
-  accept_answer: "YES"
-  reject_answer: "NO"
-  uncertain_answer: "UNCERTAIN"
-  retry_semantic_decisions: false       # 탈락한 동일 후보를 재질문하지 않음
+verifier:                              # CLIP "비현실 장면 문장" 필터 (T026, Qwen VQA 판정을 대체)
+  backend: clip_local
+  model_id: openai/clip-vit-large-patch14
+  model_path: null                     # models/weights.lock.json의 로컬 snapshot
+  model_revision: null                 # configs/upstream.lock.json의 HF revision
+  local_files_only: true
+  dtype: float32
+  preprocessing:
+    policy: pinned_processor_defaults
+  sentences_path: ../prompts/implausible_physics_v1.txt  # 버전 관리되는 고정 문장 목록(사용자 수정 가능)
+  similarity: cosine                   # L2 정규화한 projection 임베딩의 cosine. logit_scale 미적용
+  criterion: max_delta_over_source     # 문장마다 delta = sim(후보) - sim(원본)
+  max_delta: 0.03                      # 미검증 초기값. 어떤 문장이라도 delta > max_delta이면 rejected
+                                       # (= CLIP logit 3.0 상승). 보정 실험 전에는 수치를 신뢰하지 않는다
+  retry_rejected_candidates: false     # 탈락한 동일 후보를 다시 판정하지 않음
 
 storage:
   delete_rejected_images: true         # 독립 시각 검수 실험만 사전에 false 선택
-  keep_uncertain_images: true
   keep_error_images: true
-  persist_raw_vqa: true
+  persist_clip_scores: true            # 문장별 원본/후보 점수·delta를 record에 영속 저장
   atomic_writes: true
 
 export:
@@ -179,11 +182,11 @@ visualization:
   anchor_color: "#AB47BC"
   show_coordinates: true
   show_area_stats: true
-  show_vqa_results: true
+  show_filter_results: true
   rejected_comparison_policy: follow_image_retention
 
 human_review:
-  enabled: false                       # true: Qwen 통과 후 advv review로 사람이 ←통과/→불합격, export는 사람 통과분만
+  enabled: false                       # true: CLIP 필터 통과 후 advv review로 사람이 ←통과/→불합격, export는 사람 통과분만
 
 report:
   terminal_progress: true

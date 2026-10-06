@@ -10,12 +10,12 @@ from advv.ingest import scan_sources
 from advv.pipeline import Pipeline, create_run
 from advv.sampler import sample_edit, validate_plan
 from advv.storage import atomic_json, read_json, run_lock
-from conftest import FakeBackend, PROJECT
+from conftest import REJECT, FakeBackend, PROJECT
 
 
 def test_normal_no_sequence_has_no_attempt_cap(cfg):
     cfg["visualization"]["enabled"] = False
-    backend = FakeBackend(["NO"] * 15, [(i, 2, 3) for i in range(15)] + [KeyboardInterrupt()])
+    backend = FakeBackend([REJECT] * 15, [(i, 2, 3) for i in range(15)] + [KeyboardInterrupt()])
     root = create_run(cfg, "many_no", provenance="fake")
     state = Pipeline(root, backend).run()
     assert state["status"] == "interrupted" and state["attempts"] == 16
@@ -108,18 +108,18 @@ def test_effective_geometry_coordinate_inverse():
     assert value["region_operations"]["0"]["task"] == "transformation"
 
 
-def test_uncertain_skips_semantic_and_retains_quarantine(cfg):
-    backend = FakeBackend(["UNCERTAIN", "YES", "YES"], [(1, 2, 3), (4, 5, 6)])
-    root = create_run(cfg, "uncertain", provenance="fake")
+def test_verification_error_retains_quarantine(cfg):
+    backend = FakeBackend(["invalid", "invalid"], [(1, 2, 3), (4, 5, 6)])
+    root = create_run(cfg, "verification_error", provenance="fake")
     state = Pipeline(root, backend).run()
     assert state["status"] == "completed"
     from advv.reporting import records_for
 
     record = records_for(root)[0]
-    assert record["checks"]["semantic"]["status"] == "not_run"
+    assert record["status"] == "verification_error" and "clip_filter" not in record
     assert record["image_path"].startswith("quarantine/")
     assert (root / record["image_path"]).is_file()
-    assert read_json(root / "report.json")["status_counts"]["uncertain"] == 1
+    assert read_json(root / "report.json")["status_counts"]["verification_error"] == 1
 
 
 def test_interrupted_accepted_copy_recovers_without_reinference(cfg, monkeypatch):

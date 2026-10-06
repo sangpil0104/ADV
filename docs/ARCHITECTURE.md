@@ -1,6 +1,8 @@
 # 아키텍처와 모델 연결
 
-MVP 코드는 아래 구조로 구현했다. CPU 및 실제 Qwen 검증을 마쳤으며, FLUX.1-dev를 포함한 모든 가중치 설치와 사전 검사를 완료했다. 실제 DragFlow 생성과 두 모델의 전체 통합 검증은 별도 진행한다.
+MVP 코드는 아래 구조로 구현했다. CPU 및 실제 Qwen 검증을 마쳤으며, FLUX.1-dev를 포함한 모든 가중치 설치와 사전 검사를 완료했다. 실제 DragFlow 생성과 전체 통합 검증은 별도 진행한다.
+
+**판정 변경(T026, 2026-10-06 사용자 결정):** 후보 판정은 Qwen의 물리·의미 VQA에서 **CLIP "비현실 장면 문장" 필터**로 완전히 교체했다. Qwen은 원본 profile(subjects/parts 추출)에만 남는다. 의미 보존 자동 검사는 없고, 사람 최종 검수(선택)는 그대로다. CLIP 필터는 CPU 테스트와 CPU 스모크(실제 가중치, 원본 3장)만 거쳤고 GPU 실행·margin 보정은 하지 않았다.
 
 ## 모듈
 
@@ -11,19 +13,21 @@ MVP 코드는 아래 구조로 구현했다. CPU 및 실제 Qwen 검증을 마�
 | `contracts.py`, `ingest.py` | Source/EditRequest/응답 계약, EXIF 정규화, split·중복 검사 |
 | `sampler.py` | seed/source/attempt 기반 연결된 area와 operation·점 선택. `random_geometry_v1`(기본)과 저장된 proposal에서 고르는 `object_region_v2`([설계](REGION_SAMPLER.md)) |
 | `proposals.py` | v2 영역 proposal의 raw 수집 순서(`collect_raw`: entity → 부위 이름 텍스트 part의 entity 귀속 → 점 part), raw receipt 읽기·쓰기, mask 정리·필터·중복 제거(IoU 중복과 part 포함 중복, text part가 남은 entity의 point part 억제, part 출처 `text`/`point` 기록), `proposals/<source_id>/` 저장 계약과 검증 로더(CPU) |
-| `pipeline.py` | 원본 profile 고정, 총 N장 반복, 기록·재시도·재개·판정·격리 |
+| `pipeline.py` | 원본 profile 고정, CLIP 문장·원본 임베딩 고정, 총 N장 반복, 기록·재시도·재개·판정·격리 |
 | `backends/process.py`, `worker.py` | 독립 Python 환경, GPU 노출, JSONL 요청/응답, durable receipt |
 | `backends/dragflow.py` | 고정 upstream Dragger 호출과 입력/좌표 변환 |
 | `backends/dragflow_speedups.py` | 선택 실행 가속 패치(`generator.speedups`, 기본 전부 꺼짐). upstream 파일 수정 없이 프로세스 안에서 적용·기록·되돌리기 |
-| `backends/qwen.py` | 로컬 Qwen의 새 대화별 단일/두 이미지 추론 |
+| `backends/qwen.py` | 로컬 Qwen의 원본 profile 추론(원본 한 장). 후보 판정에는 쓰지 않는다 |
+| `backends/clip.py` | 로컬 CLIP(`openai/clip-vit-large-patch14`)의 L2 정규화 projection 임베딩(문장·이미지). 유사도·판정은 하지 않는다 |
 | `backends/region.py`, `sam3.py` | v2 proposal worker: 공식 SAM 3 텍스트(entity, 부위 이름 part)·점(part) prompt를 한 `set_image`로 처리해 raw receipt 기록. processor 임계값은 ADVV 하한보다 0.01 낮게 주고 채택은 ADVV `≥` 필터가 정한다. Grounding DINO + SAM 2.1은 자리만 있고 미구현 오류 |
-| `verifiers/parser.py`, `decision.py` | 엄격한 전체 JSON 파싱, 두 판정 AND |
+| `verifiers/parser.py` | profile 응답의 엄격한 전체 JSON 파싱 |
+| `verifiers/clip_filter.py` | 문장 파일 읽기, 임베딩 검증, cosine, 원본 대비 delta 판정(`judge`), 저장된 판정 재계산(`decide`) |
 | `storage.py` | atomic write, hash, 단일 writer lock, 소유 파일 삭제 |
 | `visualization.py` | CPU 원본 overlay, 나란히 비교, 좌표·영역 metadata |
 | `reporting.py` | 검증된 image-only export(사람 검수가 켜진 run은 pass만), 통계, 정적 report 링크 |
-| `human_review.py` | run별로 켜고 끄는 선택 단계. Qwen 통과 이미지의 사람 최종 판정(← pass / → fail), 검수 화면 PNG, fail 삭제 |
+| `human_review.py` | run별로 켜고 끄는 선택 단계. CLIP 필터 통과 이미지의 사람 최종 판정(← pass / → fail), 검수 화면 PNG, fail 삭제 |
 
-가중치·CUDA 없는 검사는 `tests/test_*.py`, 실제 Qwen 검사는 `scripts/check_qwen.py`, 요청값 그림은 `scripts/preview_edits.py`, DragFlow 가속 측정은 `scripts/profile_dragflow.py`·`scripts/check_dragflow_equivalence.py`(GPU, 공용 harness `scripts/dragflow_harness.py`)를 사용한다. fake backend는 tests fixture에만 있으며 production export가 거부한다.
+가중치·CUDA 없는 검사는 `tests/test_*.py`, 실제 Qwen profile 검사는 `scripts/check_qwen.py`, CLIP margin 보정용 문장별 delta 측정은 `scripts/clip_calibration.py`(이미지 쌍 또는 기존 run의 채택본, `--device cpu` 또는 미리 지정한 `CUDA_VISIBLE_DEVICES` + `cuda:0`, 결과는 새 디렉터리), 요청값 그림은 `scripts/preview_edits.py`, DragFlow 가속 측정은 `scripts/profile_dragflow.py`·`scripts/check_dragflow_equivalence.py`(GPU, 공용 harness `scripts/dragflow_harness.py`)를 사용한다. fake backend는 tests fixture에만 있으며 production export가 거부한다.
 
 ## 실행 순서와 GPU
 
@@ -33,22 +37,46 @@ MVP 코드는 아래 구조로 구현했다. CPU 및 실제 Qwen 검증을 마�
     → raw receipt → CPU build/write proposals.json (기술 오류가 재시도 후에도 남으면 region_proposals_missing 오류)
     → 모든 원본 처리 후 proposal worker 종료
     proposals/<source_id>/ 로드·검증·hash 고정 → 영역 없는 원본은 source_no_region 보류
+CLIP worker(첫 선택 GPU): 고정 문장 임베딩 → clip/texts.json (run당 1회)
+    사용 가능한 원본마다 이미지 임베딩·문장별 유사도 → clip/sources/<source_id>.json (원본당 1회, 재개 시 재사용)
+    (기술 오류가 재시도 후에도 남으면 clip_reference_error로 멈추고, 재개 때 새 round로 다시 계산)
 while 저장된 unique accepted 수 < 전체 목표 N:
     원본을 round-robin 선택
     source별 attempt index로 무작위 계획·mask 생성 및 예약 저장
         (v2에서 유효 기하가 없는 attempt는 sampling_skipped로 state에 남기고 cursor만 전진)
-    Qwen worker 종료 → DragFlow load/generate → generation receipt → worker 종료
+    CLIP worker 종료 → DragFlow load/generate → generation receipt → worker 종료
     실제 입력 metadata와 비교 PNG 저장
-    Qwen load → candidate-only physical VQA
-    physical == YES이면 original-first/candidate-second semantic VQA
+    CLIP load → 후보 한 장 임베딩 → 문장별 delta = sim(후보) − sim(원본)
+    어떤 문장이라도 delta > verifier.max_delta이면 rejected, 아니면 accepted
     판정 record 영속화 → 채택/격리/삭제 → 최종 PNG 갱신
 export/report 저장 → completed 확정
 [human_review.enabled일 때만] advv review: 사람이 accepted를 ←/→로 판정 → fail 삭제 → export(사람 pass만)/report 갱신
 ```
 
-coordinator는 torch를 import하지 않는다. worker별 Python 실행 파일과 환경을 분리하고 시작 전에 `CUDA_VISIBLE_DEVICES`를 지정한다. 선택 목록 앞 두 GPU는 DragFlow의 논리 cuda:0/1에, 첫 GPU는 Qwen과 SAM 3 proposal worker의 cuda:0에 대응한다. 한 번에 한 종류의 model worker만 띄운다(`LocalBackend`가 종류를 바꿀 때 이전 worker를 종료). 나머지 선택 GPU의 병렬 활용은 후속 최적화다. 각 execution segment에 사용 GPU·Python·시작/종료를 기록한다.
+coordinator는 torch를 import하지 않는다. worker별 Python 실행 파일과 환경을 분리하고 시작 전에 `CUDA_VISIBLE_DEVICES`를 지정한다. 선택 목록 앞 두 GPU는 DragFlow의 논리 cuda:0/1에, 첫 GPU는 Qwen profile·CLIP·SAM 3 proposal worker의 cuda:0에 대응한다. 한 번에 한 종류의 model worker만 띄운다(`LocalBackend`가 종류를 바꿀 때 이전 worker를 종료). 나머지 선택 GPU의 병렬 활용은 후속 최적화다. 각 execution segment에 사용 GPU·Python·시작/종료를 기록한다.
 
-프로파일과 두 VQA는 같은 Qwen checkpoint를 사용하지만 호출마다 새 메시지를 구성한다. 이전 응답을 대화 context에 누적하지 않는다. timeout 후에는 worker를 종료하고 제한된 기술 재시도에 새 worker를 사용한다. OOM·로드 실패는 즉시 partial failed로 종료한다. 연속 3개 후보의 기술 실패도 장애로 중단한다. 정상 NO/UNCERTAIN·중복에는 전체 시도 제한이 없다.
+Qwen은 원본 profile에만 쓰며 호출마다 새 메시지를 구성한다. timeout 후에는 worker를 종료하고 제한된 기술 재시도에 새 worker를 사용한다. OOM·로드 실패는 즉시 partial failed로 종료한다. 연속 3개 후보의 기술 실패(generation_error/verification_error)도 장애로 중단한다. 정상 rejected·중복에는 전체 시도 제한이 없다.
+
+## CLIP 비현실 장면 필터 (T026)
+
+목적은 "차가 하늘을 난다", "몸이 땅에 박혀 있다"처럼 **장면 수준의 명백한 물리 위배**만 거르는 것이다. 무늬 소실·작은 질감 흔적·경계 자국 같은 국소 미세 artifact는 검사 범위 밖이며, 필요하면 선택 단계인 사람 검수로 본다. 원본 의미 보존 검사는 하지 않는다.
+
+| 항목 | 규칙 |
+| --- | --- |
+| 모델 | `openai/clip-vit-large-patch14` revision `32bd64288804d66eefd0ccbe215aa642df71cc41`(`configs/upstream.lock.json`), 로컬 경로는 `models/weights.lock.json`. `transformers.CLIPModel`/`CLIPProcessor`, `local_files_only`, eval + `inference_mode`, 기본 fp32 |
+| 환경 | `execution.clip_python`. 별도 venv를 만들지 않고 `.venv-qwen`(torch 2.6.0 / Transformers 5.17.0)을 권장한다: CLIPModel이 포함되어 있고, CPU 스모크에서 실제 가중치 로드·추론과 `logits_per_image / logit_scale`와의 일치(차이 1e-7)를 확인했다. DragFlow 환경은 건드리지 않는다 |
+| 문장 | `verifier.sentences_path`(기본 [`prompts/implausible_physics_v1.txt`](../prompts/implausible_physics_v1.txt)). 한 줄 한 문장, `#` 줄·빈 줄 무시, 중복 금지, 77 token 초과는 worker가 오류로 거부(잘라내지 않음). 원본별 자동 생성 없음 |
+| 유사도 | L2 정규화한 projection 임베딩의 cosine. CLIP `logit_scale`(100)은 적용하지 않는다. 계산은 coordinator가 numpy float64로 한다 |
+| 판정 | 문장 i마다 `delta_i = sim(후보, 문장 i) − sim(원본, 문장 i)`. 어떤 i라도 `delta_i > verifier.max_delta`이면 `rejected`, 같거나 작으면 통과. 모두 통과하면 `accepted` |
+| 고정 | 문장 임베딩은 run당 한 번(`clip/texts.json`), 원본 이미지 임베딩·유사도는 원본당 한 번(`clip/sources/<source_id>.json`) 계산해 `frozen_sha256`과 함께 저장하고 재개 때 재사용한다. 모델 revision·문장 hash·원본 pixel hash가 맞지 않으면 새 run을 요구한다 |
+| 결과 | `accepted` / `rejected`(어느 문장이 얼마의 delta로 걸렸는지) / `verification_error`(임베딩 형상·값 오류, timeout, OOM 등). `UNCERTAIN`과 `not_run` 상태는 없다 |
+| 재질문 금지 | 탈락 후보를 다시 판정하지 않는다(`retry_rejected_candidates: false`). 기술 오류만 `max_technical_retries` 안에서 재시도한다 |
+
+`max_delta` 기본 0.03은 **미검증 초기값**이다. cosine 0.03은 CLIP logit 3.0(×100)에 해당하고, 원래 두 문장이 같은 점수였다면 해당 문장의 상대 odds가 e³≈20배가 되는 크기다. T026 CPU 예비 측정(채택 3장의 원본 대비 최대 delta 0.004–0.019, 같은 물체의 다른 정상 사진 쌍 0.015–0.024)은 표본이 작아 보정 근거가 아니다. 보정은 이후 GPU 작업이다.
+
+record는 `checks.clip`(시도·receipt·후보 임베딩 hash·문장별 유사도)과 `clip_filter`(문장별 `source`/`candidate`/`delta`/`exceeds`, `exceeded`, 최대 delta 문장 `top`, `limit`, 문장 목록 hash·문장 파일 hash, 모델 id·revision, 원본/후보 임베딩 hash)를 가진다. `decide()`는 저장된 수치로 판정을 다시 계산해 문장별 `delta`·`exceeds`, `exceeded`, `top`, `verdict` 중 하나라도 기록과 다르거나 후보 점수가 `checks.clip` 응답과 다르면 `DataError`로 본다. 재개(`recover`)와 export는 추가로 행의 문장 목록·원본 점수가 고정 기준(`clip/texts.json`, `clip/sources/<source_id>.json`)과 같은지(`check_frozen`) 확인하고, export는 `clip/texts.json`이 설정의 문장 목록·hash와 같은지도 확인한다. export 행은 `clip_filter`(`verdict`, `limit`, `top`, `similarity`, `criterion`, 모델 id·revision, 문장 목록·파일 hash, 문장별 `text`/`source`/`candidate`/`delta`; [SPEC §9](../SPEC.md#9-재현성과-완료-기준))를, report는 탈락 문장별 빈도와 문장별 delta 분포를 남긴다.
+
+**T026 이전 run.** config의 `verifier.backend`가 `qwen_multimodal_local`인(또는 `profiler` 섹션이 없는) run은 resume·export·report·review가 T026 안내와 함께 `DataError`로 거부된다(CLI `run --resume`은 preflight 전에 거부). 이미 저장된 `report.md`·`exports/images.jsonl`·record는 그대로 유효하며, 다시 만들려면 T026 이전 git revision을 쓴다. 이전 설정 파일을 `load_config`에 넣으면 이주 방법을 담은 `ConfigError`가 난다.
 
 ## 모델 revision과 연결
 
@@ -64,9 +92,9 @@ coordinator는 torch를 import하지 않는다. worker별 Python 실행 파일�
 
 원본과 mask, `instruction.json`은 후보별 `backend_input/`에 저장한다. sampler는 feature grid로 반올림했을 때 항등 이동/범위 이탈도 거부한다. 이미지 크기는 공식 코드에서 16의 배수로 낮춰 bicubic resize하며, 실제 시작점은 upstream이 feature 영역의 centroid로 교체한다. 그래서 `source_point`는 두 sampler 모두 mask의 반올림 centroid이고, 이동·회전·항등 검사도 이 점으로 계산한다. `object_region_v2`의 비볼록 mask는 centroid가 mask 밖일 수 있으므로 윤곽 선택용 mask 내부 점 `region_select_point`를 따로 저장해 `instruction.json`의 `centroids[0]`으로 넘긴다(`centroids[1]`은 `target_point`). upstream centroid는 원본 mask를 feature grid로 bilinear(align_corners=False, antialias 없음) 축소한 뒤 `> 0.5`인 영역에서 계산된다. v2 sampler는 이 축소를 재현해 grid 영역이 비거나 그 centroid가 원본 centroid의 grid 점과 한 칸 넘게 다른 얇은 proposal을 제외하므로, 남은 proposal에서만 두 시작점이 grid 한 칸 이내다. v1 계획에는 이 검사를 적용하지 않는다(v1 계획은 변경 전과 같다). upstream rotation 각도는 grid centroid 시작점·grid로 반올림한 목표점·anchor의 `atan2` 차이이므로, v2는 목표점을 실효 각도가 요청각과 같은 부호이고 `rotation_min_executed_degrees` 이상인 grid 칸 중 요청각에 가장 가까운 칸에 두고 허용 오차(`sampler.object_region.rotation_max_error_*`) 밖 각도는 다시 뽑는다(T015, T015-fix). v2의 grid 반올림은 rotation 목표 탐색의 anchor 점까지 upstream과 같은 float32 half-to-even이다(v1은 float64 유지). feature 영역의 bilinear soft mask를 NPY로 저장하고, nonzero 영역을 nearest로 원본 크기에 복원해 표시한다. 선택 영역과 확대 gradient mask를 혼동하지 않는다.
 
-Qwen은 `Qwen3_5ForConditionalGeneration`과 `AutoProcessor`로 실제 이미지 tensor를 전달한다. profile은 원본 한 장, physical은 후보 한 장, semantic은 원본·후보 두 장 순서다. bf16, eval/inference mode, thinking off, greedy decoding을 사용한다. chat template의 비활성화 표기를 확인하고 새 토큰만 decode한다. prompt·ordered image hashes·profile/hint·모델·processor·전처리·decoding 조건이 검증 identity에 포함된다. semantic prompt에는 profile의 `summary`·`must_preserve`·`uncertain`과 hint만 채우며(`subjects`·`parts` 제외), identity의 `prompt_hash`는 채운 뒤의 prompt hash다.
+Qwen(설정 `profiler` 섹션)은 `Qwen3_5ForConditionalGeneration`과 `AutoProcessor`로 원본 한 장의 실제 이미지 tensor를 전달해 profile을 만든다. bf16, eval/inference mode, thinking off, greedy decoding을 사용한다. chat template의 비활성화 표기를 확인하고 새 토큰만 decode한다. prompt·image hash·hint·모델·processor·전처리·decoding 조건이 profile identity에 포함된다.
 
-환경은 DragFlow torch 2.5.1 / Transformers 4.48.0 / Diffusers 0.32.2, Qwen torch 2.6.0 / Transformers 5.17.0, SAM 3 torch 2.10.0+cu128(Python 3.12, `.venv-sam3`)으로 분리했다. SAM 3 공식 코드 commit·가중치 revision·파일 SHA256은 `configs/upstream.lock.json`의 `region_proposal.sam3`에 있다. 전체 설치 버전은 `environments/*.freeze.txt`와 run의 `config.json`에 남긴다.
+환경은 DragFlow torch 2.5.1 / Transformers 4.48.0 / Diffusers 0.32.2, Qwen·CLIP torch 2.6.0 / Transformers 5.17.0(`.venv-qwen` 공유, worker 프로세스는 따로), SAM 3 torch 2.10.0+cu128(Python 3.12, `.venv-sam3`)으로 분리했다. SAM 3 공식 코드 commit·가중치 revision·파일 SHA256은 `configs/upstream.lock.json`의 `region_proposal.sam3`에 있다. 전체 설치 버전은 `environments/*.freeze.txt`와 run의 `config.json`에 남긴다.
 
 ## DragFlow 실행 가속 플래그 (T017)
 
@@ -90,6 +118,9 @@ runs/<run_id>/
 ├── inputs/images/<source_id>.png
 ├── profiles/<source_id>.json
 ├── profiles/<source_id>_receipts/
+├── clip/texts.json                # 고정 문장 임베딩(run당 1회)
+├── clip/sources/<source_id>.json  # 원본 이미지 임베딩·문장별 유사도(원본당 1회)
+├── clip/**/*_receipts/round_<n>/  # CLIP 호출 receipt(오류 뒤 재개는 새 round)
 ├── proposals/<source_id>/         # object_region_v2만: proposals.json + entity/part mask PNG
 │   └── receipt/                   # worker raw.json, raw_masks.npz, response.json
 ├── edit_regions/<candidate_id>.png
@@ -98,7 +129,7 @@ runs/<run_id>/
 │   ├── backend_input/             # 원본, binary mask, upstream instruction
 │   ├── generation_receipt.json
 │   ├── effective.json / effective_region.npy / effective_area.png
-│   └── vqa/                       # 호출별 raw response receipt
+│   └── clip/                      # 후보 CLIP 호출 receipt(후보 임베딩 포함)
 ├── accepted/<candidate_id>.png
 ├── quarantine/<candidate_id>/generated.png
 ├── visualizations/<candidate_id>/drag_plan.png / comparison.png / metadata.json
@@ -106,11 +137,11 @@ runs/<run_id>/
 └── report.json / report.md / logs/
 ```
 
-`config.json`에는 경로를 해석한 설정, prompt/schema 내용, 모델·환경·upstream snapshot이 있다. `manifest.json`은 코드·설정·source manifest hash를, `state.json`은 cursor·count·실행 segment를 가진다. 계획은 record의 `plan`, 실제 입력은 `effective`로 저장한다.
+`config.json`에는 경로를 해석한 설정, prompt/schema 내용, CLIP 문장 목록과 그 hash(`_assets.implausible_sentences*`), 모델·환경·upstream snapshot이 있다. `manifest.json`은 코드·설정·source manifest hash를, `state.json`은 cursor·count·실행 segment를 가진다. 계획은 record의 `plan`, 실제 입력은 `effective`로 저장한다.
 
-후보 예약을 모델 추론 전에 저장한다. 모델 응답 receipt를 worker가 coordinator 응답 전달 전에 원자적으로 쓰므로, 전달 직후 중단되어도 이미 완료한 호출을 반복하지 않는다. 재개 때 accepted 파일 hash와 unique count를 재계산하고, 미완료 reservation을 먼저 처리한다. completed check와 삭제한 NO는 재추론하지 않는다. 코드를 포함한 recipe가 바뀌면 새 run을 요구하며 GPU ID만 변경할 수 있다.
+후보 예약을 모델 추론 전에 저장한다. 모델 응답 receipt를 worker가 coordinator 응답 전달 전에 원자적으로 쓰므로, 전달 직후 중단되어도 이미 완료한 호출을 반복하지 않는다. 재개 때 accepted 파일 hash와 unique count를 재계산하고, 미완료 reservation을 먼저 처리한다. completed check와 삭제한 rejected 후보는 재추론하지 않는다. 코드를 포함한 recipe가 바뀌면 새 run을 요구하며 GPU ID만 변경할 수 있다. `verifier.sentences_path`의 문장 목록이 run 생성 때와 다르면(주석만 바꾼 것은 같음) 재개를 거부한다.
 
-NO 판정·hash를 저장한 다음 run 소유의 생성 이미지·비교 PNG·해당 atomic 임시 파일만 삭제한다. 원본 설정 그림은 남긴다. symlink·hardlink·원본·accepted 경로 삭제를 거부한다. 실패하면 cleanup_pending으로 기록해 재개한다. 시각화 실패는 별도 오류이며 quota가 채워진 뒤 추가 생성 없이 복구한다. export/report까지 완료하기 전에는 completed 상태를 확정하지 않는다.
+rejected 판정·hash를 저장한 다음 run 소유의 생성 이미지·비교 PNG·해당 atomic 임시 파일만 삭제한다. 원본 설정 그림은 남긴다. symlink·hardlink·원본·accepted 경로 삭제를 거부한다. 실패하면 cleanup_pending으로 기록해 재개한다. 시각화 실패는 별도 오류이며 quota가 채워진 뒤 추가 생성 없이 복구한다. export/report까지 완료하기 전에는 completed 상태를 확정하지 않는다.
 
 ## CLI와 경로
 

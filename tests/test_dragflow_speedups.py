@@ -379,7 +379,7 @@ def test_report_states_whether_dragflow_ran_the_official_path(cfg):
     cfg["generator"]["speedups"]["tf32"] = True
     root = create_run(cfg, "speedups", provenance="fake")
     assert read_json(root / "config.json")["generator"]["speedups"]["tf32"] is True
-    Pipeline(root, FakeBackend(["YES", "YES"], [(30, 40, 50)])).run()
+    Pipeline(root, FakeBackend(None, [(30, 40, 50)])).run()
     report = read_json(report_run(root).with_suffix(".json"))
     assert report["generator_speedups"]["enabled"] == ["skip_unused_single_blocks", "tf32"]
     assert report["generator_speedups"]["precision_variants"] == ["tf32"]
@@ -392,7 +392,7 @@ def test_default_report_says_official_path(cfg):
     from advv.pipeline import Pipeline, create_run
 
     root = create_run(cfg, "official", provenance="fake")
-    Pipeline(root, FakeBackend(["YES", "YES"], [(30, 40, 50)])).run()
+    Pipeline(root, FakeBackend(None, [(30, 40, 50)])).run()
     assert read_json(root / "report.json")["generator_speedups"]["official_execution_path"] is True
     assert "official path" in (root / "report.md").read_text()
 
@@ -407,7 +407,7 @@ def test_export_rows_carry_the_execution_path(cfg):
     cfg["generator"]["speedups"]["tf32"] = True
     cfg["run"]["target_count"] = 2
     root = create_run(cfg, "export_speedups", provenance="fake")
-    Pipeline(root, FakeBackend(["YES"] * 4, [(30, 40, 50), (31, 40, 50)])).run()
+    Pipeline(root, FakeBackend(None, [(30, 40, 50), (31, 40, 50)])).run()
     as_production(root)
     first = records_for(root)[0]
     # A record's own generation_info (written by the real backend) wins over the run config.

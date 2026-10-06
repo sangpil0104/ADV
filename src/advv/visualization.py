@@ -11,6 +11,7 @@ from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont
 
 from .storage import atomic_image, atomic_json, digest, file_hash, load_rgb, within
 from .errors import DataError
+from .verifiers.clip_filter import summary
 
 RENDERER_VERSION = "pillow_v1"
 
@@ -25,13 +26,21 @@ def _font(size=16):
     return ImageFont.load_default(size=size)
 
 
-def _status(record, name):
-    check = record.get("checks", {}).get(name, {})
-    return (
-        check.get("response", {}).get("answer")
-        if check.get("response")
-        else check.get("status", "pending").upper()
+def filter_line(record) -> str:
+    """Footer text of the CLIP implausible-scene filter: verdict, largest rise over the source, limit."""
+    result = summary(record)
+    if result is None:
+        status = record.get("checks", {}).get("clip", {}).get("status")
+        state = "ERROR" if status == "error" else "NOT RUN" if record["status"] == "generation_error" else "PENDING"
+        return f"CLIP filter: {state} | {record['status']}"
+    top = result["top"]
+    line = (
+        f"CLIP filter: {result['verdict'].upper()} | max delta {top['delta']:+.3f} vs limit {result['limit']:.3f}"
+        f' | "{top["text"]}"'
     )
+    if len(result["exceeded"]) > 1:
+        line += f" (+{len(result['exceeded']) - 1} more over limit)"
+    return line
 
 
 def render(run_dir: Path, source: dict, record: dict, settings: dict) -> dict:
@@ -120,7 +129,7 @@ def render(run_dir: Path, source: dict, record: dict, settings: dict) -> dict:
         f"{mode} | normalized original px | {w} x {h}",
         f"S start={point(geometry['source_point'])} | E end={point(geometry['target_point'])}",
         f"area={area} px ({area / (w * h):.2%}) | blue=selected area | arrow=intended movement",
-        f"Physical: {_status(record, 'physical')} | Semantic: {_status(record, 'semantic')} | {record['status']}",
+        filter_line(record),
     ]
     if plan.get("region_level"):
         lines.append(
@@ -188,8 +197,7 @@ def render(run_dir: Path, source: dict, record: dict, settings: dict) -> dict:
         "area_fraction": area / (w * h),
         "area_coordinate_system": "normalized_original",
         "preview_transform": {"scale": [sx, sy], "offset": [16, 36]},
-        "physical": _status(record, "physical"),
-        "semantic": _status(record, "semantic"),
+        "clip_filter": summary(record),
         "candidate_status": record["status"],
         "renderer_version": RENDERER_VERSION,
         "settings_hash": digest(settings),
