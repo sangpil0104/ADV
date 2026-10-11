@@ -1,6 +1,13 @@
 {
   "dragflow_commit": "b3a8fa7136df5131d07f98425c0d189fb6ca74b0",
   "fireflow_commit": "20ab81fb084c06a089bb8cf86726a28036c88d5b",
+  "segmentation": {
+    "backend": "torchvision_maskrcnn_resnet50_fpn",
+    "weights_id": "COCO_V1",
+    "torchvision": "0.20.1",
+    "url": "https://download.pytorch.org/models/maskrcnn_resnet50_fpn_coco-bf2d0c1e.pth",
+    "sha256": "bf2d0c1efbc936eeee2bc95a48e80ebc86b891f61b0106485937fc29f9315fc0"
+  },
   "models": {
     "Qwen/Qwen3.5-4B": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
     "black-forest-labs/FLUX.1-dev": "3de623fc3c33e44ffbe2bad470d0f45bccf2eb21",

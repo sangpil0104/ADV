@@ -1,120 +1,153 @@
-# 구현 단계와 완료 기준
+# CLIP 전환 구현 계획
 
-확정 요구사항은 SPEC v0.4 기준이다. 코드 및 CPU·로컬 Qwen 검증을 마쳤으며, 실제 DragFlow와 Qwen으로 N=1 생성·검증·저장을 완료했다. 확대된 실제 통합 검증과 연구 평가는 아래 미완료 항목으로 남긴다. [검증 범위](RUN_VERIFICATION.md)를 참고한다. 목표는 **총 N장의 현실적이고 의미가 보존된 새 이미지를 자동 생성하는 파이프라인**이다.
+## 2026-10-11: 종류별 시각화 저장
 
-## P0. 외부 모델 연결과 입력 계약
+- [x] comparison/drag_plan/metadata 폴더별 개별 파일 저장과 생성 이미지 전체 grid 자동 갱신.
+- [x] CPU `advv visualize` 명령, 기존 PNG 무변경 이전, metadata·record·report·export 경로 갱신, lock/중단 복구.
+- [x] 실제 기존 결과 51장 적용, 보호 대상 145파일·시각화 PNG 102개 hash 불변 확인.
+- [x] CPU 전체 148검사·lint·v0.4.1 설치/wheel 빌드 완료. GPU 추론 없음.
 
-- [x] 사용자 예제 `assets/original_image.png` (528×598)를 연결하고 정규화·Qwen 입력·요청값 그림을 확인했다. 산업/사고/희귀 생물 대표 표본의 품질 평가는 별도로 필요하다.
-- [x] DragFlow·submodule commit, FLUX/adapter/encoder revision을 고정한다.
-- [x] 공식 demo와 instruction 구조를 확인하여 relocation/deformation/rotation에 필요한 mask·점·anchor·강도 매핑을 문서화한다.
-- [x] Qwen3.5-4B와 processor를 로컬에 준비하고 별도 환경 버전을 고정한다. 추가 학습은 하지 않는다.
-- [x] `--gpus`로 선택한 장치만 worker에 노출하는 preflight를 구현한다. 단일 GPU 지원 여부는 가정하지 않는다.
-- [ ] 실행 범위가 주어졌을 때 공식 DragFlow demo와 Qwen의 한 장/두 장 이미지 입력을 각각 검증한다.
+## 최신 전환: 사고 관련 차량 전체 공동 이동
 
-완료 기준: 실제 연결 지점, operation별 지원, 로컬 가중치·환경·장치 요구가 확인되었다. 실행하지 않은 추론은 검증 대기로 표시한다.
+2026-10-09, [SPEC v0.9](../SPEC.md), **v0.4.0**. 사용자 확정 범위는 사고 관련 차량 전체만이다.
 
-## P1. CPU 기반 상태·수량·sampler
+- [x] `accident_group.py`: 접촉/겹침 관계를 유지한 객체 cutout·맥락 crop의 로컬 CLIP 비교. 단독 사고도 평가하고 선택 0대이면 보류한다. 선택 ID·점수·방법·문장/모델 identity를 cache한다.
+- [x] `segmentation.py`, `contracts.py`: 각 전체 mask와 합집합·차량 ID/hash/면적. 연결 성분·내부 빈 공간을 제거하지 않는다.
+- [x] `sampler.py`, `group_geometry.py`, `config.py`: 부분 면적/확장 설정 폐기, 공통 비항등 Δ와 원본/feature grid 프레임 내 유지.
+- [x] `group_adapter.py`, `dragflow.py`: contour loader 우회, 전체 단일 region 전달, centroid 교체 후 공통 Δ 유지, 배경 복원 support 분리.
+- [x] `visualization.py`: 생성 전 selection preview; 채택 후보의 전체 mask·차량 ID·공통 화살표·계획 목표 윤곽.
+- [x] `motion.py`: 차량별 template matching Δ·잔차 진단. 불확실한 결과를 이동 성공으로 인증하거나 채택 조건에 추가하지 않는다.
+- [x] CPU 회귀와 실제 image1의 Mask R-CNN+CLIP CPU forward. 자세한 수량/범위는 [빌드 검증](CLIP_BUILD_VERIFICATION.md).
+- [ ] 사용자 실행 시 새 run의 실제 GPU DragFlow 그룹 이동, 차량 누락/충돌 관계 보존, VRAM과 처리량을 검증한다.
+- [ ] 별도 사고 데이터와 사람 검수로 source selector의 완전성/오선택률, 출력 이동 진단 정확도·허용 오차를 검증한다.
 
-- [x] 이미지 폴더를 manifest로 변환하고 input 중복·경로·split을 검사한다.
-- [x] SourceProfile/EditRequest/CheckResult/Decision 계약과 엄격한 JSON 파서를 구현한다.
-- [x] seed·source ID·attempt index에 따른 연결 영역·방향·operation sampler를 구현한다.
-- [x] 총 N장 counter, 원본 round-robin, 무제한 반복, 사용자 중단·재개를 구현한다.
-- [x] 원자적 저장, 단일 writer lock, NO 삭제, 중복 제외를 구현한다.
-- [x] [시각화 명세](VISUALIZATION.md)의 start/end/area overlay와 원본·생성 결과 1×2 PNG 렌더러를 CPU에서 구현한다.
-- [x] fake backend는 CPU fixture 전용으로 표시하고 실제 dataset export와 분리한다.
+source selector는 보정되지 않은 baseline이다. 개발 이미지 image1의 선택 확인을 다른 사고/단독 사고의 일반화 근거로 사용하지 않는다. 이전 run은 보존하며 새 태스크 성공 사례로 재분류하지 않는다.
 
-필수 CPU 검증:
+## 이전 v0.3.0 구현 기록
+
+기준: [SPEC v0.7](../SPEC.md), 2026-10-08. **v0.3.0에 GPU 쌍별 병렬 처리와 고정 기본 경로를 추가했다.** 아래 완료 표시는 소스·계약 검사 범위이며, P5의 실제 GPU 통합과 사고 도메인 품질 평가는 미완료다. [빌드 검증 범위](CLIP_BUILD_VERIFICATION.md)를 함께 확인한다.
+
+## P0. 요구사항과 전환 계약
+
+- [x] 차량 사고 블랙박스 단일 프레임으로 주제를 좁힌다.
+- [x] segment 내부 start, 무작위 end·range, 자유형 edit mask의 의미를 고정한다.
+- [x] 영어 CLIP 서술문 10개와 `3-of-4 AND mandatory-5` 정책을 버전 파일로 만든다.
+- [x] 5번을 추돌에 한정하지 않는 일반 교통사고 vs 정상 교통으로 정의한다.
+- [x] 선택 `--prompt`의 적용 범위·기본값·우선순위·재개 제약을 문서화한다.
+- [x] 기존 비채택 상세 산출물의 정리와 최소 시간 장부 예외를 정의한다.
+- [x] 시도 시간·실패 포함 획득 시간·중단 후 pending 보존을 정의한다.
+- [x] 모든 worker를 conda `ADVV`로 통일하는 변경 경계를 정한다.
+
+선정한 segmenter는 torchvision Mask R-CNN ResNet50-FPN COCO_V1이다. CLIP·segmenter의 실제 CPU forward와 단일 환경 Dragger import는 확인했다. 이전 GPU 중단 요청을 유지하여 실제 생성은 시작하지 않았다.
+
+## P1. 계약·CLI·환경 준비
+
+수정 대상: `src/advv/{cli,config,contracts,prepare,preflight}.py`, `backends/{process,worker}.py`, 설정·환경 명세.
+
+- [x] schema 2.0과 Segment/CLIPResult/TimingRecord를 추가한다. 기존 schema 1.1 run과 명확히 구분한다.
+- [x] argparse `run`에 선택적 `--prompt`를 추가하고 `generation.augmentation_prompt`로 정규화한다. 빈 값·재개 중 변경은 모델 로드 전에 거부한다.
+- [x] `--prompt` 생략 시 기본 사고 장면 지시, CLI > YAML > 기본값 우선순위를 적용한다. 숫자 N/`--target-count` 기존 규칙은 유지한다.
+- [x] Qwen 필수 다운로드·SourceProfile·VQA schema 연결과 별도 interpreter 설정을 새 경로에서 제거한다.
+- [x] 공식 segmenter API·COCO class·전체 checkpoint SHA256을 확인하고 실제 CPU 연결을 검사했다. 실제 GPU 자원 사용량은 P5에서 확인한다.
+- [x] **conda ADVV 안에서** DragFlow·CLIP·segmenter 의존성을 resolve하고 import/프로세스 호환성을 검사한다. 다른 환경으로 우회하지 않는다.
+- [x] 모든 worker를 같은 `sys.executable`로 실행하고 실제 prefix를 검증한다. `prepare`의 venv 경로 생성과 preflight의 venv 전제를 제거한다.
+- [x] 검증한 단일 conda 파일/freeze와 새 설정 예시를 작성한다. 기존 freeze는 과거 기록으로 구분한다.
+
+완료 기준: GPU 생성 없이 새 CLI·설정·동일 환경 worker 계약을 검사할 수 있다. 의존성 설치 성공과 실제 모델 연결 성공을 별도로 보고한다.
+
+## P2. Segmentation·자유형 sampler·생성 prompt
+
+수정 대상: `segmentation.py`, `backends/segmentation.py` 신규, `sampler.py`, `backends/dragflow.py`.
+
+- [x] 원본별 segment cache에 원본 hash·모델 revision·전처리·mask를 저장한다. 다른 설정/원본의 cache를 재사용하지 않는다.
+- [x] 차량 segment 선택, 내부 start, 랜덤 end, 랜덤 면적의 연결된 자유형 편집 mask를 만든다. bbox/타원 fallback을 두지 않는다.
+- [x] `range_fraction_of_image`와 요청/실현 `area_pixels`의 정의·허용 오차·초기 분포를 고정한다. 이동 거리와 독립된 파라미터로 구현한다.
+- [x] 비볼록 영역 centroid, 경계 start, 작은 mask, feature-grid 양자화 후 항등 이동을 검사한다.
+- [x] upstream 실제 start/area와 요청값의 차이를 처리한다. 계약을 깨는 실제 centroid는 계획 재표본/명시적 실패로 처리한다.
+- [x] 기본 도메인 source prompt + 선택 원본 설명 + 증강 prompt를 실제 target prompt로 연결한다. CLIP 문장과 별도의 입력으로 유지한다.
+- [x] 사용 가능한 source가 없으면 명시적인 종료 상태를 기록한다. 매번 입력 원본에서 새 후보를 생성한다.
+
+완료 기준: 같은 seed/source/attempt에서 같은 계획을 재현하고 mask·좌표를 실제 adapter에 전달할 수 있다. 자유형 mask를 그린 그림만으로 실제 적용 검증을 완료했다고 보고하지 않는다.
+
+## P3. CLIP verifier와 정책
+
+수정 대상: `backends/clip.py` 신규, `verifiers/decision.py`, `pipeline.py`, worker protocol.
+
+- [x] [10개 문장](../prompts/clip_criteria_v1.json)을 고정 순서로 읽고 모델/processor/문장 hash로 text embedding을 cache한다.
+- [x] 전체 프레임 letterbox·normalization·tokenization을 고정한다. 사고 가장자리 정보의 crop 손실과 조용한 text truncation을 막는다.
+- [x] float32 정규화 embedding으로 raw cosine 10개를 구한다. logit/probability와 혼동하지 않는다.
+- [x] 모든 점수의 유효성을 먼저 검사하고 B−A>0, 1–4 중 3개 이상, 5번 필수 정책을 적용한다.
+- [x] Qwen profile/두 VQA 호출을 새 production 경로에서 제거한다. 같은 유효 탈락 후보를 재검증하지 않는다.
+- [x] 정확 중복 제외·총 N장·사용자 중단을 새 정책과 연결한다. 정상 탈락에는 총 시도 상한을 넣지 않는다.
+
+완료 기준: 정책의 모든 Boolean 조합과 숫자 오류를 CPU fixture로 검사한다. 실제 CLIP 품질은 별도 평가 대상으로 남긴다.
+
+## P4. 비채택 정리·시간·안전한 전환
+
+수정 대상: `storage.py`, `pipeline.py`, `reporting.py`, `cleanup.py`/`timing.py` 신규.
+
+- [x] pending 후보를 private staging에 두고 채택 확정 후에만 공개 이미지·상세 record를 만든다.
+- [x] 비채택 후보의 이미지·receipt·mask·점수·원본 설정 그림·비교 그림·임시 사본을 모두 정리한다. 장부에는 최소 상태/시간만 남긴다.
+- [x] 새 run과 resume 시작 시 관리 output root의 종료된 run을 lock한 뒤 기존 비채택 파일을 정리한다. 활성 run/원본/채택 파일은 보호한다.
+- [x] 기존 상세 record에서 알려진 시간만 이전한다. 기존 VQA accepted는 보존하되 CLIP export/quota에서 제외한다. VQA run을 v2로 강제 resume하지 않는다.
+- [x] timing/cursor → 후보 cleanup journal → 삭제 → 최소 tombstone과 반복 복구를 구현한다. 기존 run 정리의 전체 범위가 반환되기 전 shared log/report/export도 갱신한다.
+- [x] 최소 시간 ledger를 쓰지 못하면 먼저 삭제하지 않는다. 정리 실패는 완료로 보고하지 않는다.
+- [x] monotonic active segments, attempt/stage 비용, 앞선 실패를 다음 accepted cost에 배정하는 규칙을 구현한다.
+- [x] pause downtime 제외, 재로드 비용 포함, 마지막 pending 보존, crash의 부분 시간 표시, 재개 중복 합산 방지를 구현한다.
+- [x] 과거 report/log의 탈락 상세 내용도 제거한다. 판별 불가 혼합 파일은 `cleanup_blocked`로 알린다.
+
+완료 기준: 기존 결과를 흉내 낸 임시 fixture에서만 먼저 삭제를 검증한다. 실제 기존 결과 정리는 구현·검증 후 사용자 실행의 명시된 정책으로 수행하며 이번 개발에서는 실제 기존 run 정리를 실행하지 않았다.
+
+## P4.1 GPU 쌍별 병렬 실행과 기본 경로
+
+- [x] GPU 목록을 두 개씩 묶어 독립 backend/worker에 배정하고 한 묶음 안의 단계는 순차 실행한다.
+- [x] coordinator만 후보를 예약하고 전역 중복·채택·quota·공유 시간을 갱신한다. `accepted + in_flight <= N`을 유지한다.
+- [x] 빠른 작업의 재할당, N=1, 동시 중복, 중단 시 모든 worker 종료, 다른 묶음 수로 재개를 CPU에서 검사한다.
+- [x] `--input-dir` 제거, cwd와 무관한 기본 설정, 자동 run ID, assets/inputs 및 assets/outputs 경로를 적용한다.
+- [x] 기존 assets 바로 아래 이미지 9장을 inputs로 이동하고 파일 SHA256이 변하지 않았음을 확인한다. 과거 runs 결과는 유지한다.
+- [x] 개별 후보 시간과 겹침을 제거한 공유 run active 비용을 구분하여 문서화한다.
+- [ ] 실제 GPU 4·5/6·7의 동시 생성·검증·10장 종료와 GPU 메모리/처리량을 검증한다.
+
+## P5. 채택 전용 시각화·리포트·통합
+
+- [x] 채택 후보만 실제 start/end/자유형 area를 표시한다. 요청값·실효값·면적·CLIP margin·실패 포함 시간을 연결한다.
+- [x] 표시 없는 생성 이미지만 CLIP/학습 입력으로 사용하고 overlay hash가 입력에 섞이지 않는지 검사한다.
+- [x] 사용자 보고서는 채택 이미지 상세와 집계/시간만 제공한다. 탈락 이미지·링크·점수를 재생성하지 않는다.
+- [x] 이미지가 채택된 뒤 시각화/commit만 실패하면 추가 생성 없이 복구한다.
+- [x] README를 구현한 CLI와 현재 로컬 준비 상태에 맞춘다. 실제 GPU 명령의 전체 통합 성공은 아직 주장하지 않는다.
+- [ ] 추후 GPU 실행이 요청되면 작은 N으로 실제 segmenter→DragFlow→CLIP→저장·시간·정리를 검사한다. 중단/재개와 장치 해제도 확인한다.
+
+완료 기준: conda ADVV 하나에서 선택한 GPU만 사용하고 총 N장의 고유한 채택 이미지를 만들며, 실패 상세 산출물을 남기지 않고 실패 비용까지 보고한다.
+
+## 필수 회귀 검증 표
+
+아래 계약과 GPU 쌍별 동시 실행·공유 quota를 CPU 회귀 테스트로 검증한다. 최신 개수와 결과는 [빌드 검증](CLIP_BUILD_VERIFICATION.md)을 따른다. 실제 GPU 모델의 동작·품질을 대체하는 검증은 아니다.
 
 | 사례 | 기대 결과 |
 | --- | --- |
-| physical=YES, semantic=YES | 두 결과가 유효할 때만 accepted |
-| physical=YES, semantic=NO | rejected; 사고/결함 의미 변경을 통과시키지 않음 |
-| physical=NO/UNCERTAIN | semantic=not_run; 각각 rejected/uncertain |
-| physical=YES, semantic=UNCERTAIN/오류 | uncertain/verification_error, quota +0 |
-| 소문자·추가/중복 key·잘린 JSON·빈 reason·code fence | verification_error |
-| reason 또는 입력 prompt에만 YES가 있음 | answer를 대체하지 않음 |
-| 동일 seed/source/attempt, 다른 worker 실행 순서 | 동일 계획·mask |
-| 범위 밖 좌표·빈 mask·항등 변환·비지원 operation | backend 호출 전 실패 |
-| 두 이미지의 순서나 원본/profile hash 변경 | 기존 semantic cache 재사용 금지 |
-| 원본 10장, 목표 N=3 | 총 3장 저장; 원본별 3장으로 처리하지 않음 |
-| 두 VQA YES이지만 원본/기존 후보와 동일 픽셀 | 중복 제외, quota 증가 없음 |
-| N-1장에서 NO·오류·중복 후 YES | N장에서 성공 종료; 다음 생성 호출 없음 |
-| NO가 긴 시퀀스로 반복됨 | 숨겨진 총 attempt cap 없이 유지; 테스트는 취소 이벤트로 종료 |
-| 사용자 취소 후 같은 run 재개 | 확정 count/attempt 보존, 중복 채택·재추론 없음 |
-| GPU ID만 바꿔 재개 | 허용, 새 execution segment 기록 |
-| 모델·prompt·sampler·profile 변경 후 재개 | 기존 run에 섞기 금지 |
-| NO record 저장 후 삭제 전에 중단 | 재개 시 삭제만 수행 |
-| accepted 파일 저장 후 record 전에 중단 | hash/transaction 확인 후 복구; count 중복 없음 |
-| 원본·다른 run·외부 symlink를 삭제 대상으로 지정 | 삭제 차단 |
-| 원본 profile 모두 uncertain/error | no_eligible_sources, 성공 아님 |
-| val/test 입력 또는 split 간 group/내용 중복 | 생성 제외 또는 preflight 실패 |
-| 직사각형 원본의 리사이즈·패딩·EXIF 회전 | start/end/area에 같은 좌표 변환 적용 |
-| backend가 점·mask를 반올림/변환함 | 요청값과 실제 전달값을 구분하여 표시 |
-| 가까운 점·가장자리 점·작은 영역·anchor | 기호·좌표·범례가 가려지지 않음 |
-| 시각화 전후 실제 이미지·VQA 입력 | 파일/픽셀 hash 동일; overlay가 검증 입력에 섞이지 않음 |
-| NO 후보의 비교 PNG·썸네일이 존재 | 생성 픽셀 포함 복사본 삭제, 원본 설정 PNG 보존 |
-| N장 달성 후 시각화만 실패하여 재개 | 렌더링만 복구; 추가 생성·VQA·quota 증가 없음 |
+| 5항목 Boolean 32조합 | 정확히 5조합 통과; 5번 실패는 전부 탈락 |
+| 1–4 중 3개 통과 + 5 통과 / 2개 통과 + 5 통과 | 각각 통과 / 탈락 |
+| A=B, NaN/Inf/점수 누락/0-norm | 동점은 해당 항목 실패; 숫자 오류는 검증 오류 |
+| 선택 prompt 생략/CLI·YAML 중복/공백/재개 입력 | 기본/CLI 우선/오류/오류; CLIP 문장 hash 불변 |
+| 같은 seed/source/attempt | 같은 segment·mask·좌표·크기 |
+| 자유형 비볼록 mask, feature-grid 양자화 | 실제 start 내부·유효 이동, 요청/실효값 구분 |
+| 원본 10장·N=3·탈락/중복 혼합 | 전체 총 3장; N 다음 생성 호출 없음 |
+| 정상 탈락 긴 반복 | 숨겨진 총 상한 없음; 테스트는 취소 이벤트로 종료 |
+| 탈락의 mask/receipt/PNG/thumbnail/record/log 링크 | 최종 제거; 시간 장부에 상세 점수/이미지 없음 |
+| 원본·채택·외부 symlink·hardlink·활성 run | 삭제 차단 |
+| 최소 장부 저장 실패 / 삭제 중 crash | 선삭제 금지 / 재개 정리만, 비용·count 중복 없음 |
+| 기존 VQA accepted·rejected·알 수 없는 상태 | 보존·명시 상태 정리·추정 삭제 금지 |
+| 실패40 + 실패50 + 성공60 | attempt60 / accepted cost150 |
+| 중단 전 pending, 오랜 pause 후 resume | pause 제외·pending 유지·재초기화 포함 |
+| N=0채택 중단, 마지막 실패, 과거 부분 시간 | 평균 null·잔여 비용 보존·불명 시간 null |
+| 생성 완료 후 시각화/commit crash | 생성/검증 재호출 없이 복구, quota 한 번 |
+| ADVV 밖 coordinator / 다른 Python worker | preflight 오류; venv 자동 생성/fallback 없음 |
+| val/test 또는 group/픽셀 split 중복 | 누수 차단; 검증 통과가 GT 승계로 이어지지 않음 |
 
-완료 기준: 실제 가중치·네트워크·CUDA 없이 반복과 상태를 검증한다. 무제한 반복 테스트에 실제 무한 실행을 사용하지 않는다.
+CPU 검증과 실제 GPU 검증을 분리한다. 실제 모델이 특정 fixture에서 반드시 탈락해야 한다고 단정하는 테스트는 정책 테스트로 대체한다.
 
-## P2. 원본 의미 추출과 실제 DragFlow 생성
+## 과거 검증과 이후 평가
 
-- [x] Qwen으로 원본의 summary/must_preserve/uncertain을 추출하고 생성 전에 고정한다.
-- [x] 사용자 선택 설명을 context로 연결하되 자동 추정 내용과 출처를 구분한다.
-- [x] sampler 계획을 upstream instruction으로 변환하고 실제 편집을 수행한다. N=1 rotation 사례 확인.
-- [x] 원본 정규화·mask·좌표·prompt·seed·계획·출력 hash를 추적한다.
-- [x] 산업 손상/사고를 정상화하는 target prompt가 자동 삽입되지 않는지 확인한다.
-- [ ] supported operation의 실제 출력과 편집 적용 여부를 원본과 비교한다.
-- [x] 실제 backend에 전달된 점·mask·전처리 정보를 저장하고 이를 사용한 시각화의 좌표 정합성을 확인한다. N=1 사례 범위.
+2026-09-30의 CPU 79개 통과와 DragFlow+Qwen N=1 결과는 **legacy 방식의 기록**이다. 새 CLIP·segmentation·단일 conda·정리 정책의 검증 증거로 재사용하지 않는다. 수치는 [과거 실행 기록](RUN_VERIFICATION.md)에 보존한다.
 
-완료 기준: 수동 mask·점·GT 라벨 없이 입력 이미지에서 자동 계획과 실제 DragFlow 후보를 만든다. 수동 replay는 디버깅 수단이며 MVP 자동화의 완료 증거를 대체하지 않는다.
-
-## P3. 두 VQA와 목표 수량 반복
-
-- [x] candidate-only physical, source+candidate semantic 호출을 별도로 연결한다.
-- [x] non-thinking template, completion 추출, parser, raw response 기록을 구현한다.
-- [x] 각 판정의 completed/error/not_run 상태와 최종 AND 결합을 구현한다.
-- [ ] 생성/검증 GPU 생명주기를 반복 루프와 연결하고 사용자 선택 밖의 장치를 쓰지 않는지 확인한다.
-- [ ] 실제 소규모 N을 지정하여 목표 수량 달성·NO 제거·중단·재개를 검증한다.
-
-완료 기준: 실제 두 모델로 unique accepted N장을 만들고 계보와 두 판정을 추적한다. 통합 테스트에 시간 제한을 둘 수 있으나 production 총 실행 정책과 구분한다. 모델이 반드시 NO를 출력해야 하는 테스트는 두지 않고 결정론적 fixture로 분기를 검증한다.
-
-## P4. 이미지 데이터셋과 품질 평가
-
-- [x] 확정/부분 export manifest를 만들고 성공/중단/실패를 구분한다.
-- [x] accepted/N, attempts, 두 check별 탈락, 중복, 원본별 기여, 시간/VRAM을 보고한다.
-- [x] report에서 후보별 drag_plan/comparison 파일을 연결하고 삭제된 비교 이미지는 링크에서 제외한다.
-- [ ] [평가 계획](EVALUATION.md)에 따라 소규모 독립 검수 표본으로 현실성·의미 보존·다양성을 확인한다.
-- [x] 실제 설치·실행·GPU 선택·재개 예시와 한계를 README에 갱신한다.
-
-완료 기준: 사용자가 이미지와 N을 넣고 GT 없이 파이프라인을 사용할 수 있다. 품질 검증용 사람 판정과 모델 학습용 GT를 구분한다.
-
-## P5. 이후 연구: 후속 성능과 선택적 fine-tuning
-
-- [ ] 필요해진 과제의 GT와 task-specific exporter를 준비한다.
-- [ ] 증강 전 group split을 고정하고 공정한 비교군으로 후속 모델을 평가한다.
-- [ ] Qwen의 반복적인 도메인 오류가 확인될 때만 별도 fine-tuning 실험을 설계한다.
-
-P5는 1차 파이프라인의 완료 조건이 아니다. Qwen 추가 학습이 필요하다고 미리 가정하지 않는다.
-
-## 초기 구현의 검증 기록 (2026-09-29)
-
-- CPU: **65개 테스트 통과**. strict parser/AND 판정, round-robin 총량, source·accepted 중복, NO/UNCERTAIN 분기, bounded 기술 재시도, OOM, 중단·receipt 복구, 삭제 안전성, profile 보류, 시각화 복구, EXIF/좌표, venv 경로 검사.
-- 실제 Qwen: `integration_checks/qwen_worker/results.json`에 profile 및 단일/두 이미지 결과와 VRAM·토큰·버전 기록. 같은 원본 두 장 비교는 의미 입력 경로 검사이며 증강 성공 사례가 아니다.
-- 실제 DragFlow: core import와 adapter 구현, FLUX 다운로드 및 GPU 0–7 사전 검사까지 확인. 생성·effective geometry·성능·GPU 메모리 검증은 미실행.
-- 요청값 그림: `integration_checks/edit_previews/visualizations/`, 생성 미실행 표기.
-- 외부 replay 파일 import/sidecar/다중 후보 병렬화/GT annotation export는 현재 구현하지 않았다.
-
-- 설치 후 검사: `integration_checks/flux_installation.json`의 FLUX 24개 파일 크기·공개 LFS SHA256 통과. `integration_checks/preflight_after_flux.json`의 모델/환경/예제 입력 및 GPU 0–7 사전 검사 ready.
-
-## 2026-09-30 CLI 수량 입력
-
-- `advv run N ...` 위치 인자를 추가하고 기존 `--target-count N`과 YAML 수량 입력을 유지했다.
-- 잘못된 수량, 두 형식의 동시 지정, 재개 중 수량 입력은 모델·run 접근 전에 거부한다.
-- CLI에서 설정 로드·실제 수량 반복·저장·재개까지 CPU fixture로 검사했다. NO와 중복을 제외하고 요청한 총량에서 종료하는지 확인했다. 전체 CPU 테스트 **79개 통과**, lint 통과. 이번 변경 검증에서 GPU 추론은 실행하지 않았다.
-
-## 2026-09-30 실제 N=1 실행
-
-- `first_trial_001`에서 실제 DragFlow 생성과 Qwen 두 YES 판정, 고유 이미지 한 장의 저장·export·시각화를 확인했다.
-- 위 초기 기록의 생성 미실행 상태 이후 진행된 결과다. 전체 operation의 품질, 실제 모델 중단·재개와 도메인 평가는 완료로 간주하지 않는다.
-- 실행 파일은 로컬에 보관하며 Git에 포함하지 않는다. 수치와 범위는 [검증 기록](RUN_VERIFICATION.md)에 정리했다.
+P5의 실제 GPU 통합 확인 이후 사람 검수와 도메인 평가를 수행한다. 채택 이미지의 품질, 실패 포함 비용, 원본별 기여와 다양성을 먼저 보고하고 후속 학습은 그다음이다. 탈락 후보를 남기는 연구 실험이 필요해도 기본 삭제 정책을 몰래 끄지 않는다. [EVALUATION.md](EVALUATION.md)의 평가 범위를 따른다.

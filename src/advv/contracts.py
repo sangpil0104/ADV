@@ -16,7 +16,7 @@ class Source:
     height: int
     split: str = "source"
     group_id: str = ""
-    domain: str = "unspecified"
+    domain: str = "dashcam_accident"
     preserve_hint: str | None = None
     label: dict | None = None
     group_inferred: bool = False
@@ -41,7 +41,14 @@ class EditRequest:
     source_prompt: str
     target_prompt: str
     mask_sha256: str
-    schema_version: str = "1.1"
+    segment_id: str = ""
+    segment_mask_path: str = ""
+    segment_mask_hash: str = ""
+    range_fraction_of_image: float = 0.0
+    area_pixels: int = 0
+    augmentation_prompt: str | None = None
+    accident_group: dict | None = None
+    schema_version: str = "2.0"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -49,6 +56,8 @@ class EditRequest:
 
 @dataclass
 class RawResponse:
+    """Legacy Qwen response type; not used by the v2 production path."""
+
     text: str
     info: dict[str, Any] = field(default_factory=dict)
 
@@ -63,10 +72,7 @@ class Generated:
 class Backend(Protocol):
     provenance: str
 
-    def complete(
-        self, images: list[Path], prompt: str, max_new_tokens: int, *, receipt=None
-    ) -> RawResponse: ...
-
+    def segment(self, source: Source, run_dir: Path) -> dict: ...
+    def verify(self, image: Path, *, receipt: str) -> dict: ...
     def generate(self, source: Source, plan: EditRequest, run_dir: Path) -> Generated: ...
-
     def close(self) -> None: ...

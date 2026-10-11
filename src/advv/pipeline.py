@@ -1,27 +1,26 @@
 from __future__ import annotations
 
 import copy
-import json
 import logging
-import platform
 import time
-from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from tqdm import tqdm
 
-from .config import recipe_hash
+from .cleanup import cleanup_candidate, recover_cleanup
+from .config import gpu_groups, recipe_hash, validate_config
 from .contracts import EditRequest, Source
 from .errors import BackendError, DataError, FatalBackendError, ResponseError
 from .ingest import scan_sources, snapshot_sources
-from .sampler import sample_edit, validate_plan
+from .sampler import candidate_id, sample_edit, validate_plan
+from .segmentation import validate_segments
 from .storage import (
+    atomic_bytes,
     atomic_image,
     atomic_json,
-    delete_generated,
     digest,
     file_hash,
-    generated_temporary_paths,
     load_rgb,
     now,
     pixel_hash,
@@ -30,12 +29,11 @@ from .storage import (
     safe_id,
     within,
 )
+from .timing import ActiveClock, attempts_for, save_attempt
 from .verifiers.decision import decide
-from .verifiers.parser import parse_response
 from .visualization import render
 
 LOG = logging.getLogger(__name__)
-TERMINAL = {"accepted", "rejected", "uncertain", "verification_error", "generation_error"}
 
 
 def implementation_hash() -> str:
@@ -43,25 +41,26 @@ def implementation_hash() -> str:
     return digest({str(p.relative_to(base)): file_hash(p) for p in sorted(base.rglob("*.py"))})
 
 
-def create_run(cfg: dict, run_id: str, *, provenance: str) -> Path:
+def create_run(cfg: dict, run_id: str, *, provenance: str, initial_seconds=0.0) -> Path:
+    started = time.monotonic()
+    validate_config(cfg)
     safe_id(run_id)
     sources, stats = scan_sources(cfg)
     root = Path(cfg["run"]["output_root"]).resolve()
-    # A run cannot nest inside an input image tree that would be ingested on future runs.
     data_root = Path(cfg["dataset"]["root"]).resolve()
     if root.is_relative_to(data_root):
         raise DataError("output_root must be outside dataset root")
     root.mkdir(parents=True, exist_ok=True)
     run_dir = root / run_id
     run_dir.mkdir(exist_ok=False)
-    cfg = copy.deepcopy(cfg)
-    atomic_json(run_dir / "config.json", cfg)
+    atomic_json(run_dir / "config.json", copy.deepcopy(cfg))
     sources = snapshot_sources(sources, run_dir)
     atomic_json(run_dir / "sources.json", [s.to_dict() for s in sources])
     atomic_json(
         run_dir / "manifest.json",
         {
-            "schema_version": "1.1",
+            "schema_version": "2.0",
+            "project": "ADVV",
             "run_id": run_id,
             "created_at": now(),
             "backend": provenance,
@@ -74,509 +73,522 @@ def create_run(cfg: dict, run_id: str, *, provenance: str) -> Path:
     atomic_json(
         run_dir / "state.json",
         {
-            "status": "running",
+            "status": "ready",
             "accepted_count": 0,
             "attempts": 0,
             "cursor": {},
             "next_source": 0,
             "segments": [],
+            "consecutive_technical_failures": 0,
         },
     )
+    clock = ActiveClock(run_dir, initial_seconds=initial_seconds + time.monotonic() - started)
+    clock.checkpoint()
     return run_dir
 
 
+def _relocate(value, old, new):
+    if isinstance(value, str):
+        return new + value[len(old) :] if value.startswith(old + "/") else value
+    if isinstance(value, dict):
+        return {k: _relocate(v, old, new) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_relocate(v, old, new) for v in value]
+    return value
+
+
 class Pipeline:
-    def __init__(self, run_dir: Path, backend, *, gpu_ids=None):
+    def __init__(self, run_dir: Path, backend, *, gpu_ids=None, initial_seconds=0.0, clock=None):
         self.root = run_dir.resolve()
         self.cfg = read_json(self.root / "config.json")
+        validate_config(self.cfg)
         self.manifest = read_json(self.root / "manifest.json")
-        if recipe_hash(self.cfg) != self.manifest["recipe_sha256"]:
-            raise DataError("Run configuration changed; start a new run")
+        if (
+            self.manifest["schema_version"] != "2.0"
+            or recipe_hash(self.cfg) != self.manifest["recipe_sha256"]
+        ):
+            raise DataError("Recipe changed or legacy run; start a new CLIP run")
         if implementation_hash() != self.manifest["implementation_sha256"]:
-            raise DataError("ADVV implementation changed; use the original code to resume or start a new run")
+            raise DataError("Implementation changed; use original code or start a new run")
         self.sources = [Source(**s) for s in read_json(self.root / "sources.json")]
         if digest([s.to_dict() for s in self.sources]) != self.manifest["input_manifest_sha256"]:
-            raise DataError("Source snapshot manifest changed")
+            raise DataError("Source manifest changed")
         for source in self.sources:
             if pixel_hash(within(self.root, source.image_path, must_exist=True)) != source.pixel_sha256:
-                raise DataError(f"Input snapshot changed: {source.source_id}")
-        self.by_id = {s.source_id: s for s in self.sources}
-        self.backend = backend
-        if backend.provenance != self.manifest["backend"]:
+                raise DataError("Source snapshot changed")
+        self.backends = list(backend) if isinstance(backend, (list, tuple)) else [backend]
+        if not self.backends or any(b.provenance != self.manifest["backend"] for b in self.backends):
             raise DataError("Backend provenance changed")
-        self.state = read_json(self.root / "state.json")
+        self.by_id = {s.source_id: s for s in self.sources}
+        self.backend = self.backends[0]
         self.gpu_ids = gpu_ids or self.cfg["execution"]["selected_gpu_ids"]
-        self.records = sorted(
-            [read_json(p) for p in (self.root / "records").glob("*.json")], key=lambda r: r["sequence"]
-        )
-        self.profiles = {}
+        self.gpu_groups = gpu_groups(self.gpu_ids)
+        if len(self.backends) != len(self.gpu_groups) or len({id(b) for b in self.backends}) != len(
+            self.backends
+        ):
+            raise DataError("Each GPU pair requires its own independent backend")
+        self.initial_seconds, self.clock_function = initial_seconds, clock
+        self.accepted, self.segment_cache = [], {}
         self.seen = {s.pixel_sha256 for s in self.sources}
-        self.accepted = []
 
     def save_state(self):
-        self.state.update(accepted_count=len(self.accepted), attempts=len(self.records), updated_at=now())
+        attempt_ids = {r["candidate_id"] for r in attempts_for(self.root) + self.pending_records()}
+        self.state.update(accepted_count=len(self.accepted), updated_at=now(), attempts=len(attempt_ids))
         atomic_json(self.root / "state.json", self.state)
 
-    def save_record(self, record):
-        record["updated_at"] = now()
-        atomic_json(self.root / f"records/{record['candidate_id']}.json", record)
+    def pending_records(self):
+        return sorted(
+            [read_json(p) for p in (self.root / ".staging").glob("*/record.json")],
+            key=lambda r: r["sequence"],
+        )
 
-    def _complete(self, owner, check, images, prompt, schema, max_tokens, save, receipt_base):
-        checks = owner.setdefault("checks", {})
-        entry = checks.setdefault(check, {"status": "pending", "response": None, "attempts": []})
-        if entry["status"] in ("completed", "error", "not_run"):
-            return entry
-        identity = {
-            "check": check,
-            "image_hashes_in_order": [pixel_hash(p) for p in images],
-            "prompt_hash": digest(prompt),
-            "verifier": self.cfg["verifier"],
-            "max_new_tokens": max_tokens,
-        }
-        key = digest(identity)
-        if entry.get("cache_key", key) != key:
-            raise DataError("Verification inputs changed during resume")
-        entry.update(cache_key=key, prompt_sha256=digest(prompt), input_identity=identity)
-        max_attempts = 1 + self.cfg["execution"]["max_technical_retries"]
-        while len(entry["attempts"]) < max_attempts or (
-            entry["attempts"] and entry["attempts"][-1]["status"] == "pending"
-        ):
-            if not entry["attempts"] or entry["attempts"][-1]["status"] != "pending":
-                attempt = {"index": len(entry["attempts"]), "status": "pending", "started_at": now()}
-                entry["attempts"].append(attempt)
-            else:
-                attempt = entry["attempts"][-1]
-            receipt = f"{receipt_base}/{check}_{attempt['index']}.json"
-            attempt["receipt"] = receipt
-            save()
-            started = time.monotonic()
+    def save_private(self, record):
+        atomic_json(within(self.root, f".staging/{record['candidate_id']}/record.json"), record)
+
+    def _retry(self, record, stage, operation):
+        errors = record.setdefault("retries", {}).get(stage, 0)
+        if errors > self.cfg["execution"]["max_technical_retries"]:
+            raise BackendError("stage_retry_exhausted")
+        while errors <= self.cfg["execution"]["max_technical_retries"]:
+            self.save_private(record)
+            # Only the coordinator mutates the shared clock; lane intervals may overlap.
+            clock = self.clock_function or time.monotonic
+            start = clock()
             try:
-                path = within(self.root, receipt)
-                if path.exists():
-                    result = read_json(path)
-                    if not result["ok"]:
-                        cls = FatalBackendError if result["error"]["fatal"] else BackendError
-                        raise cls(result["error"]["message"])
-                    text, info = result["result"]["text"], result["result"]["info"]
-                else:
-                    response = self.backend.complete(images, prompt, max_tokens, receipt=receipt)
-                    text, info = response.text, response.info
-                    # Test backends also have a durable receipt, never silently branded as real.
-                    atomic_json(path, {"ok": True, "result": {"text": text, "info": info}})
-                attempt.update(raw_completion=text, info=info)
-                parsed = parse_response(text, schema)
-                attempt.update(status="completed", elapsed_seconds=time.monotonic() - started)
-                entry.update(status="completed", response=parsed)
-                save()
-                return entry
-            except (ResponseError, BackendError, FatalBackendError) as exc:
-                attempt.update(
-                    status="error",
-                    error_type=type(exc).__name__,
-                    error=str(exc),
-                    elapsed_seconds=time.monotonic() - started,
-                )
+                result = operation()
+                return result
+            except (BackendError, ResponseError) as exc:
                 if isinstance(exc, FatalBackendError):
-                    entry.update(status="error", fatal=True)
-                    save()
                     raise
-                save()
-        entry["status"] = "error"
-        save()
-        return entry
+                errors += 1
+                record["retries"][stage] = errors
+                if errors > self.cfg["execution"]["max_technical_retries"]:
+                    raise
+            finally:
+                end = clock()
+                times = record.setdefault("stage_seconds", {})
+                times[stage] = times.get(stage, 0.0) + end - start
+                self.save_private(record)
 
-    def profile_sources(self):
-        assets = self.cfg["_assets"]
+    def _segments(self):
         for source in self.sources:
             if source.split not in self.cfg["dataset"]["eligible_splits"]:
                 continue
-            path = self.root / f"profiles/{source.source_id}.json"
-            profile = (
-                read_json(path)
-                if path.exists()
-                else {
-                    "source_id": source.source_id,
-                    "source_pixel_sha256": source.pixel_sha256,
-                    "preserve_hint": source.preserve_hint,
-                    "status": "pending",
-                    "checks": {},
-                }
-            )
-            if profile["status"] == "pending":
-                prompt = assets["profile_prompt"].replace(
-                    "{{user_hint}}", json.dumps(source.preserve_hint, ensure_ascii=False)
-                )
-                entry = self._complete(
-                    profile,
-                    "profile",
-                    [within(self.root, source.image_path)],
-                    prompt,
-                    assets["profile_schema"],
-                    self.cfg["source_profile"]["max_new_tokens"],
-                    lambda: atomic_json(path, profile),
-                    f"profiles/{source.source_id}_receipts",
-                )
-                profile["response"] = entry["response"]
-                profile["status"] = (
-                    "source_error"
-                    if entry["status"] == "error"
-                    else "source_uncertain"
-                    if entry["response"]["uncertain"]
-                    else "ready"
-                )
-                profile["frozen_sha256"] = digest(
-                    {"response": profile["response"], "hint": source.preserve_hint}
-                )
-                atomic_json(path, profile)
-            if profile.get("response") and profile.get("frozen_sha256") != digest(
-                {"response": profile["response"], "hint": source.preserve_hint}
+            path = within(self.root, f"segments/{source.source_id}/result.json")
+            if path.exists():
+                result = read_json(path)
+            else:
+                for attempt in range(1 + self.cfg["execution"]["max_technical_retries"]):
+                    try:
+                        result = self.backend.segment(source, self.root)
+                        break
+                    except FatalBackendError:
+                        raise
+                    except BackendError:
+                        if attempt == self.cfg["execution"]["max_technical_retries"]:
+                            result = {
+                                "segments": [],
+                                "source_sha256": source.pixel_sha256,
+                                "settings_sha256": digest(self.cfg["segmentation"]),
+                                "info": {"error_code": "segmenter_error"},
+                            }
+                atomic_json(path, result)
+            if result["source_sha256"] != source.pixel_sha256 or result["settings_sha256"] != digest(
+                self.cfg["segmentation"]
             ):
-                raise DataError(f"Frozen profile changed: {source.source_id}")
-            self.profiles[source.source_id] = profile
-        self.eligible = [
-            s for s in self.sources if self.profiles.get(s.source_id, {}).get("status") == "ready"
-        ]
-        if not self.eligible:
-            raise DataError("no_eligible_sources: all source profiles are uncertain or invalid")
+                raise DataError("Segment cache identity changed")
+            validate_segments(source, result, self.root)
+            if result.get("selection"):
+                from .accident_group import selection_identity
 
-    def recover(self):
+                if result["selection"]["identity"] != selection_identity(self.cfg):
+                    raise DataError("Accident selection cache identity changed")
+            self.segment_cache[source.source_id] = result
+            self.clock.checkpoint()
+        self.eligible = [s for s in self.sources if self.segment_cache.get(s.source_id, {}).get("accident_group")]
+        if not self.eligible:
+            raise DataError("no_eligible_sources")
+
+    def _recover(self):
+        recover_cleanup(self.root)
         self.seen = {s.pixel_sha256 for s in self.sources}
+        committed = sorted(
+            [read_json(p) for p in (self.root / "records").glob("*.json")], key=lambda r: r["sequence"]
+        )
         self.accepted = []
-        for record in self.records:
-            source = self.by_id[record["source_id"]]
+        for record in committed:
+            if record.get("status") != "accepted" or record.get("export_status") != "eligible":
+                raise DataError("Nonaccepted record in public records")
+            if decide(record["clip"]) != "accepted" or record["backend"] != self.backend.provenance:
+                raise DataError("Invalid accepted decision/provenance")
+            if record["clip"]["criteria_sha256"] != self.cfg["_assets"]["criteria_sha256"]:
+                raise DataError("CLIP criteria changed")
+            path = within(self.root, record["image_path"], must_exist=True)
+            if (
+                pixel_hash(path) != record["pixel_sha256"]
+                or file_hash(path) != record["file_sha256"]
+                or record["pixel_sha256"] in self.seen
+            ):
+                raise DataError("Accepted image changed/duplicated")
             if digest(record["plan"]) != record["plan_sha256"]:
-                raise DataError("Stored edit plan changed")
-            validate_plan(EditRequest(**record["plan"]), source, self.root)
-            if record.get("export_status") == "eligible":
-                if decide(record["checks"]) != "accepted" or record["backend"] != self.manifest["backend"]:
-                    raise DataError("Invalid accepted record")
-                path = within(self.root, record["image_path"], must_exist=True)
-                if file_hash(path) != record["file_sha256"] or pixel_hash(path) != record["pixel_sha256"]:
-                    raise DataError(f"Accepted artifact changed: {record['candidate_id']}")
-                if record["pixel_sha256"] in self.seen:
-                    raise DataError("Duplicate in committed accepted artifacts")
-                self.seen.add(record["pixel_sha256"])
-                self.accepted.append(record)
-            sid = record["source_id"]
-            self.state["cursor"][sid] = max(
-                self.state["cursor"].get(sid, 0), record["plan"]["attempt_index"] + 1
-            )
+                raise DataError("Accepted plan changed")
+            if digest(record["effective"]) != record["effective_sha256"]:
+                raise DataError("Accepted effective geometry changed")
+            validate_plan(EditRequest(**record["plan"]), self.by_id[record["source_id"]], self.root)
+            self.seen.add(record["pixel_sha256"])
+            # Repairs only artifacts, never invokes the generator or CLIP.
+            self._finish_presentation(record)
+            save_attempt(self.root, record["timing"])
+            self.accepted.append(record)
+            cleanup_candidate(self.root, record["candidate_id"], staging_only=True)
+        self.clock.reconcile(self.accepted)
+        all_entries = attempts_for(self.root) + self.pending_records()
+        for entry in all_entries:
+            index = entry.get("attempt_index", entry.get("plan", {}).get("attempt_index"))
+            if index is not None:
+                sid = entry["source_id"]
+                self.state["cursor"][sid] = max(self.state["cursor"].get(sid, 0), index + 1)
+        for entry in attempts_for(self.root):
+            if entry["outcome"] in ("rejected", "duplicate", "error"):
+                # Idempotent even when a cleanup journal was written just before a crash.
+                if (
+                    entry.get("cleanup_state") != "cleaned"
+                    or (self.root / f".staging/{entry['candidate_id']}").exists()
+                ):
+                    cleanup_candidate(self.root, entry["candidate_id"])
         if len(self.accepted) > self.cfg["run"]["target_count"]:
             raise DataError("Accepted count exceeds quota")
-        self.save_state()
 
-    def visualize(self, record):
-        try:
+    def _timing(self, record, outcome, *, cleanup_state="pending"):
+        current = self.clock.checkpoint()
+        return {
+            "candidate_id": record["candidate_id"],
+            "source_id": record["source_id"],
+            "attempt_index": record["attempt_index"],
+            "sequence": record["sequence"],
+            "outcome": outcome,
+            "attempt_elapsed_seconds": current - record["started_active_seconds"],
+            "stage_seconds": dict(record.get("stage_seconds", {})),
+            "timing_complete": self.clock.state["timing_complete"],
+            "cleanup_state": cleanup_state,
+        }
+
+    def _discard(self, record, outcome, error_code=None):
+        entry = self._timing(record, outcome)
+        entry["timing_complete"] = False  # Cleanup has not finished; preserve this on a crash.
+        if error_code:
+            entry["error_code"] = error_code
+        before_save = self.clock.checkpoint()
+        save_attempt(self.root, entry)
+        start = self.clock.checkpoint()
+        entry["stage_seconds"]["persistence"] = (
+            entry["stage_seconds"].get("persistence", 0.0) + start - before_save
+        )
+        cleanup_candidate(self.root, record["candidate_id"])
+        end = self.clock.checkpoint()
+        entry["cleanup_state"] = "cleaned"
+        entry["stage_seconds"]["cleanup"] = end - start
+        entry["attempt_elapsed_seconds"] = end - record["started_active_seconds"]
+        entry["timing_complete"] = self.clock.state["timing_complete"]
+        save_attempt(self.root, entry)
+
+    def _finish_presentation(self, record):
+        artifacts = record.get("visualization", {}).get("artifacts", {})
+        complete = record.get("presentation_complete") and all(
+            key in artifacts and within(self.root, artifacts[key]).is_file()
+            for key in ("drag_plan", "comparison", "metadata")
+        )
+        if not complete:
             record["visualization"] = render(
                 self.root, self.by_id[record["source_id"]].to_dict(), record, self.cfg["visualization"]
             )
-        except (OSError, ValueError, DataError) as exc:
-            record["visualization"] = {"status": "error", "error": str(exc), "error_type": type(exc).__name__}
-            LOG.exception("Visualization failed for %s", record["candidate_id"])
-        self.save_record(record)
+            record["presentation_complete"] = True
+            atomic_json(self.root / f"records/{record['candidate_id']}.json", record)
 
-    def finalize(self, record):
+    def _commit(self, record):
+        persistence_start = self.clock.checkpoint()
         cid = record["candidate_id"]
-        if not record.get("finalized"):
-            decision = record["status"]
-            for check in ("physical", "semantic"):
-                record["checks"].setdefault(check, {"status": "not_run", "response": None, "attempts": []})
-            if decision == "accepted":
-                if record["pixel_sha256"] in self.seen:
-                    record["export_status"] = "duplicate"
-                else:
-                    destination = f"accepted/{cid}.png"
-                    atomic_image(
-                        within(self.root, destination),
-                        load_rgb(within(self.root, record["image_path"], must_exist=True)),
-                    )
-                    record.update(
-                        image_path=destination,
-                        export_status="eligible",
-                        file_sha256=file_hash(within(self.root, destination)),
-                    )
-                    self.seen.add(record["pixel_sha256"])
-                    self.accepted.append(record)
-            else:
-                record["export_status"] = "excluded"
-            settings = self.cfg["storage"]
-            delete = (
-                (decision == "rejected" and settings["delete_rejected_images"])
-                or (decision == "uncertain" and not settings["keep_uncertain_images"])
-                or (
-                    decision in ("verification_error", "generation_error")
-                    and not settings["keep_error_images"]
-                )
-            )
-            record["delete_image"] = delete
-            if record.get("image_path") and record["export_status"] != "eligible" and not delete:
-                destination = f"quarantine/{cid}/generated.png"
-                atomic_image(
-                    within(self.root, destination),
-                    load_rgb(within(self.root, record["image_path"], must_exist=True)),
-                )
-                record["image_path"] = destination
-            record.update(finalized=True, cleanup_pending=True)
-            # Decisions and hashes are durable before deletion or cleanup.
-            self.save_record(record)
-        self.cleanup(record)
-        self.visualize(record)
+        old, new = f".staging/{cid}", f"artifacts/{cid}"
+        source_dir = within(self.root, old)
+        # Only verified, unique candidates are copied to public artifacts.
+        for file in sorted(source_dir.rglob("*")):
+            if file.is_symlink():
+                raise DataError("Unexpected symlink in private candidate")
+            if file.is_file() and file != source_dir / "record.json":
+                if file.stat().st_nlink > 1:
+                    raise DataError("Unexpected hardlink in private candidate")
+                relative = (Path(new) / file.relative_to(source_dir)).as_posix()
+                atomic_bytes(within(self.root, relative), file.read_bytes())
+        accepted = _relocate(copy.deepcopy(record), old, new)
+        image_path = f"accepted/{cid}.png"
+        atomic_image(within(self.root, image_path), load_rgb(within(self.root, record["image_path"])))
+        accepted.update(
+            image_path=image_path,
+            file_sha256=file_hash(within(self.root, image_path)),
+            status="accepted",
+            export_status="eligible",
+            presentation_complete=False,
+            requested_plan_sha256=record["plan_sha256"],
+        )
+        accepted["plan_sha256"] = digest(accepted["plan"])
+        accepted["effective_sha256"] = digest(accepted["effective"])
+        accepted["timing"] = self._timing(record, "accepted", cleanup_state="cleaned")
+        cost, watermark = self.clock.allocation()
+        accepted["timing"].update(accepted_cost_seconds=cost, accepted_active_watermark=watermark)
+        # Prepare required graphics, then freeze the accounting boundary immediately before commit.
+        accepted["visualization"] = render(
+            self.root, self.by_id[record["source_id"]].to_dict(), accepted, self.cfg["visualization"]
+        )
+        record["stage_seconds"]["persistence"] += self.clock.checkpoint() - persistence_start
+        accepted["stage_seconds"] = dict(record["stage_seconds"])
+        accepted["timing"] = self._timing(record, "accepted", cleanup_state="cleaned")
+        cost, watermark = self.clock.allocation()
+        accepted["timing"].update(accepted_cost_seconds=cost, accepted_active_watermark=watermark)
+        atomic_json(self.root / f"records/{cid}.json", accepted)  # acceptance commit authority
+        self.clock.reconcile(self.accepted + [accepted])
+        self._finish_presentation(accepted)  # final footer uses the committed cost; overhead is pending
+        save_attempt(self.root, accepted["timing"])
+        self.accepted.append(accepted)
+        self.seen.add(accepted["pixel_sha256"])
+        cleanup_candidate(self.root, cid, staging_only=True)
+        from .visualization_collection import build_collection
 
-    def cleanup(self, record):
-        if not record.get("cleanup_pending"):
-            return
-        cid = record["candidate_id"]
-        paths = [f"candidates/{cid}/generated.png"]
-        paths += generated_temporary_paths(self.root, cid)
-        if record.get("delete_image"):
-            paths += [
-                f"quarantine/{cid}/generated.png",
-                f"visualizations/{cid}/comparison.png",
-                f"visualizations/{cid}/thumbnail.png",
-            ]
-        # A generation error may have no committed candidate; clean any unfinished output too.
-        try:
-            for relative in paths:
-                delete_generated(self.root, cid, relative)
-            if record.get("delete_image"):
-                record["image_path"] = None
-            record["cleanup_pending"] = False
-            record.pop("cleanup_error", None)
-        except (OSError, DataError) as exc:
-            record["cleanup_error"] = str(exc)
-        self.save_record(record)
+        build_collection(self.root)
 
-    def process_candidate(self, record):
-        if record.get("source_profile_sha256") != self.profiles[record["source_id"]]["frozen_sha256"]:
-            raise DataError("Candidate source profile changed")
-        if record.get("effective") and record.get("effective_sha256") != digest(record["effective"]):
-            raise DataError("Effective backend instruction changed")
-        if record["status"] in TERMINAL:
-            self.finalize(record)
-            return
-        plan = EditRequest(**record["plan"])
+    def _infer(self, record, backend):
+        """A lane owns only its candidate's private files, never the shared quota."""
         source = self.by_id[record["source_id"]]
-        if record["status"] == "planned":
-            self.visualize(record)
-            attempts = record.setdefault("generation_attempts", [])
-            limit = 1 + self.cfg["execution"]["max_technical_retries"]
-            while len(attempts) < limit or (attempts and attempts[-1]["status"] == "pending"):
-                if not attempts or attempts[-1]["status"] != "pending":
-                    attempts.append({"status": "pending", "started_at": now()})
-                self.save_record(record)
-                started = time.monotonic()
-                try:
-                    result = self.backend.generate(source, plan, self.root)
-                    path = result.path.resolve()
-                    expected = within(self.root, f"candidates/{plan.edit_id}/generated.png").resolve()
-                    if path != expected:
-                        raise FatalBackendError("Generator wrote an unexpected output path")
-                    record.update(
-                        image_path=str(path.relative_to(self.root)),
-                        pixel_sha256=pixel_hash(path),
-                        file_sha256=file_hash(path),
-                        effective=result.effective,
-                        effective_sha256=digest(result.effective),
-                        generation_info=result.info,
-                        status="generated",
-                    )
-                    attempts[-1].update(status="completed", elapsed_seconds=time.monotonic() - started)
-                    self.save_record(record)
-                    break
-                except (BackendError, FatalBackendError) as exc:
-                    attempts[-1].update(
-                        status="error",
-                        error_type=type(exc).__name__,
-                        error=str(exc),
-                        elapsed_seconds=time.monotonic() - started,
-                    )
-                    if isinstance(exc, FatalBackendError):
-                        record["status"] = "generation_error"
-                        record["fatal"] = True
-                        self.save_record(record)
-                        self.finalize(record)
-                        raise
-                    self.save_record(record)
-            if record["status"] != "generated":
-                record["status"] = "generation_error"
-                self.save_record(record)
-                self.finalize(record)
-                return
-        candidate = within(self.root, record["image_path"], must_exist=True)
-        if pixel_hash(candidate) != record["pixel_sha256"]:
-            raise DataError("Candidate changed during resume")
-        self.visualize(record)
-        a = self.cfg["_assets"]
-
-        def save():
-            self.save_record(record)
-
-        receipt_base = f"candidates/{record['candidate_id']}/vqa"
-        try:
-            physical = self._complete(
+        if record["status"] == "reserved":
+            plan = self._retry(
                 record,
-                "physical",
-                [candidate],
-                a["physical_prompt"],
-                a["vqa_schema"],
-                self.cfg["verifier"]["max_new_tokens"],
-                save,
-                receipt_base,
+                "planning",
+                lambda: sample_edit(
+                    source,
+                    self.segment_cache[source.source_id],
+                    self.cfg,
+                    record["attempt_index"],
+                    self.root,
+                ),
             )
-            if physical.get("response", {}) and physical["response"]["answer"] == "YES":
-                profile = self.profiles[source.source_id]
-                context = json.dumps(
-                    {"source_profile": profile["response"], "preserve_hint": source.preserve_hint},
-                    ensure_ascii=False,
-                )
-                prompt = a["semantic_prompt"].replace("{{preservation_context}}", context)
-                self._complete(
-                    record,
-                    "semantic",
-                    [within(self.root, source.image_path), candidate],
-                    prompt,
-                    a["vqa_schema"],
-                    self.cfg["verifier"]["max_new_tokens"],
-                    save,
-                    receipt_base,
-                )
-            else:
-                record["checks"]["semantic"] = {"status": "not_run", "response": None, "attempts": []}
-            record["status"] = decide(record["checks"])
-        except FatalBackendError:
-            record["status"] = "verification_error"
-            record["fatal"] = True
-            self.save_record(record)
-            self.finalize(record)
-            raise
-        self.save_record(record)
-        self.finalize(record)
+            record.update(plan=plan.to_dict(), plan_sha256=digest(plan.to_dict()), status="planned")
+            self.save_private(record)
+        plan = EditRequest(**record["plan"])
+        if digest(record["plan"]) != record["plan_sha256"]:
+            raise DataError("Private plan changed")
+        validate_plan(plan, source, self.root)
+        if record["status"] == "planned":
+            result = self._retry(record, "generation", lambda: backend.generate(source, plan, self.root))
+            expected = within(self.root, f".staging/{plan.edit_id}/backend/generated.png")
+            if result.path.resolve() != expected.resolve():
+                raise FatalBackendError("unexpected_generator_output")
+            record.update(
+                image_path=str(expected.relative_to(self.root)),
+                pixel_sha256=pixel_hash(expected),
+                file_sha256=file_hash(expected),
+                effective=result.effective,
+                effective_sha256=digest(result.effective),
+                generation_info=result.info,
+                status="generated",
+            )
+            self.save_private(record)
+        candidate = within(self.root, record["image_path"], must_exist=True)
+        if (
+            pixel_hash(candidate) != record["pixel_sha256"]
+            or digest(record["effective"]) != record["effective_sha256"]
+        ):
+            raise DataError("Candidate/effective geometry changed")
+        if record["status"] == "generated":
+
+            def verify():
+                result = backend.verify(candidate, receipt=f".staging/{record['candidate_id']}/clip.json")
+                decide(result)
+                if result["criteria_sha256"] != self.cfg["_assets"]["criteria_sha256"]:
+                    raise ResponseError("CLIP criterion identity mismatch")
+                return result
+
+            record["clip"] = self._retry(record, "verification", verify)
+            record["status"] = "scored"
+            self.save_private(record)
+
+    def _finish_candidate(self, record, future):
+        # Coordinator-only: score decision, global dedup, durable commit and quota.
+        try:
+            future.result()
+        except (BackendError, ResponseError) as exc:
+            self._discard(record, "error", type(exc).__name__)
+            if isinstance(exc, FatalBackendError):
+                raise
+            return "error"
+        except DataError:
+            if record["status"] != "reserved":
+                raise
+            self._discard(record, "error", "sampling_error")
+            return "error"
+        if decide(record["clip"]) == "rejected":
+            self._discard(record, "rejected")
+            return "rejected"
+        if record["pixel_sha256"] in self.seen:
+            self._discard(record, "duplicate")
+            return "duplicate"
+        if len(self.accepted) >= self.cfg["run"]["target_count"]:
+            raise DataError("Shared accepted quota is already full")
+        self._commit(record)
+        return "accepted"
+
+    def _reserve(self):
+        index = self.state["next_source"] % len(self.eligible)
+        source = self.eligible[index]
+        attempt = self.state["cursor"].get(source.source_id, 0)
+        entries = attempts_for(self.root) + self.pending_records()
+        record = {
+            "schema_version": "2.0",
+            "candidate_id": candidate_id(source, self.cfg, attempt),
+            "source_id": source.source_id,
+            "attempt_index": attempt,
+            "sequence": max([r["sequence"] for r in entries] or [-1]) + 1,
+            "backend": self.backend.provenance,
+            "status": "reserved",
+            "created_at": now(),
+            "started_active_seconds": self.clock.checkpoint(),
+            "stage_seconds": dict.fromkeys(
+                ("planning", "generation", "verification", "persistence", "cleanup"), 0.0
+            ),
+        }
+        self.save_private(record)
+        self.state["cursor"][source.source_id] = attempt + 1
+        self.state["next_source"] = (index + 1) % len(self.eligible)
+        self.save_state()
+        return record
+
+    def _run_candidates(self, target):
+        pending = self.pending_records()
+        if len(self.accepted) + len(pending) > target:
+            raise DataError("Pending reservations exceed shared quota")
+        entries = attempts_for(self.root) + pending
+        if len(self.accepted) < target and entries:
+            ids = [s.source_id for s in self.eligible]
+            last = max(entries, key=lambda r: r["sequence"])["source_id"]
+            self.state["next_source"] = (ids.index(last) + 1) % len(ids) if last in ids else 0
+        pool = ThreadPoolExecutor(max_workers=len(self.backends), thread_name_prefix="advv-candidate")
+        running, idle = {}, list(range(len(self.backends)))
+        try:
+            with tqdm(
+                total=target,
+                initial=len(self.accepted),
+                desc="accepted",
+                disable=not self.cfg["report"]["terminal_progress"],
+            ) as bar:
+                while len(self.accepted) < target:
+                    # Every in-flight candidate reserves one remaining output slot.
+                    # Near the target this prevents overshoot AND unnecessary GPU work.
+                    while idle and len(self.accepted) + len(running) < target:
+                        record = pending.pop(0) if pending else self._reserve()
+                        lane = idle.pop(0)
+                        record["gpu_group"] = self.gpu_groups[lane]
+                        self.save_private(record)
+                        future = pool.submit(self._infer, record, self.backends[lane])
+                        running[future] = (lane, record)
+                    done, _ = wait(running, timeout=0.2, return_when=FIRST_COMPLETED)
+                    self.clock.checkpoint()
+                    # A fast lane can continue while another lane is still generating.
+                    for future in sorted(done, key=lambda f: running[f][1]["sequence"]):
+                        lane, record = running.pop(future)
+                        outcome = self._finish_candidate(record, future)
+                        idle.append(lane)
+                        self.state["consecutive_technical_failures"] = (
+                            self.state["consecutive_technical_failures"] + 1 if outcome == "error" else 0
+                        )
+                        self.save_state()
+                        if (
+                            self.state["consecutive_technical_failures"]
+                            >= self.cfg["execution"]["max_consecutive_technical_failures"]
+                        ):
+                            raise FatalBackendError("consecutive_technical_failures")
+                        bar.update(len(self.accepted) - bar.n)
+                        bar.set_postfix(
+                            attempts=len(attempts_for(self.root)),
+                            in_flight=len(running),
+                            active_seconds=round(self.clock.state["run_active_seconds"], 1),
+                        )
+        finally:
+            # Stop child processes before joining threads or releasing the run lock.
+            # cancel() also prevents a generation->verification race from starting a new GPU process.
+            for backend in self.backends:
+                getattr(backend, "cancel", backend.close)()
+            pool.shutdown(wait=True, cancel_futures=True)
+            # Another lane may have finished a rejected score while this lane stopped.
+            # Keep unfinished work for resume, but never retain a known CLIP rejection.
+            for record in self.pending_records():
+                if (
+                    record["status"] != "scored"
+                    or (self.root / f"records/{record['candidate_id']}.json").exists()
+                ):
+                    continue
+                ledger = self.root / f"timings/attempts/{record['candidate_id']}.json"
+                if ledger.exists() and read_json(ledger)["outcome"] in ("rejected", "duplicate", "error"):
+                    # A failed cleanup already has a durable journal. Preserve its partial
+                    # accounting for recovery, rather than retrying/masking the error here.
+                    continue
+                if decide(record["clip"]) == "rejected":
+                    self._discard(record, "rejected")
+                elif record["pixel_sha256"] in self.seen:
+                    self._discard(record, "duplicate")
 
     def run(self):
         with run_lock(self.root):
-            # Reload mutable state under the writer lock, not from a pre-lock snapshot.
             self.state = read_json(self.root / "state.json")
-            self.records = sorted(
-                [read_json(p) for p in (self.root / "records").glob("*.json")], key=lambda r: r["sequence"]
-            )
+            self.clock = ActiveClock(self.root, clock=self.clock_function)
+            self.clock.start(overhead=self.initial_seconds)
             self.state.update(status="running", last_error=None)
             self.state["segments"].append(
                 {
                     "started_at": now(),
                     "selected_gpu_ids": self.gpu_ids,
-                    "generator_gpu_ids": self.gpu_ids[:2] if self.gpu_ids else [],
-                    "verifier_gpu_ids": self.gpu_ids[:1] if self.gpu_ids else [],
-                    "python": platform.python_version(),
-                    "platform": platform.platform(),
+                    "gpu_groups": self.gpu_groups,
+                    "candidate_concurrency": len(self.backends),
                 }
             )
             self.save_state()
+            final_status = "failed"
             try:
-                self.recover()
-                self.profile_sources()
-                # Reconstruct round-robin position from the last committed reservation.
-                if self.records:
-                    last = self.records[-1]["source_id"]
-                    self.state["next_source"] = ([s.source_id for s in self.eligible].index(last) + 1) % len(
-                        self.eligible
-                    )
-                for record in self.records:
-                    self.process_candidate(record)
+                self._recover()
                 target = self.cfg["run"]["target_count"]
-                consecutive_failures = 0
-                with tqdm(
-                    total=target,
-                    initial=len(self.accepted),
-                    desc="accepted",
-                    disable=not self.cfg["report"]["terminal_progress"],
-                ) as bar:
-                    while len(self.accepted) < target:
-                        index = self.state["next_source"]
-                        source = self.eligible[index]
-                        attempt_index = self.state["cursor"].get(source.source_id, 0)
-                        plan = sample_edit(
-                            source,
-                            self.profiles[source.source_id]["response"],
-                            self.cfg,
-                            attempt_index,
-                            self.root,
-                        )
-                        record = {
-                            "schema_version": "1.1",
-                            "candidate_id": plan.edit_id,
-                            "source_id": source.source_id,
-                            "sequence": len(self.records),
-                            "backend": self.backend.provenance,
-                            "plan": plan.to_dict(),
-                            "plan_sha256": digest(plan.to_dict()),
-                            "source_profile_sha256": self.profiles[source.source_id]["frozen_sha256"],
-                            "status": "planned",
-                            "checks": {},
-                            "created_at": now(),
-                            "export_status": "pending",
-                        }
-                        self.save_record(record)
-                        self.records.append(record)
-                        self.state["cursor"][source.source_id] = attempt_index + 1
-                        self.state["next_source"] = (index + 1) % len(self.eligible)
-                        self.save_state()  # Reserve before any inference.
-                        self.process_candidate(record)
-                        self.save_state()
-                        consecutive_failures = (
-                            consecutive_failures + 1
-                            if record["status"] in ("generation_error", "verification_error")
-                            else 0
-                        )
-                        if (
-                            consecutive_failures
-                            >= self.cfg["execution"]["max_consecutive_technical_failures"]
-                        ):
-                            raise FatalBackendError(
-                                "Consecutive technical failures; inspect logs before resuming"
-                            )
-                        bar.update(len(self.accepted) - bar.n)
-                        counts = Counter(r["status"] for r in self.records)
-                        bar.set_postfix(
-                            attempts=len(self.records),
-                            rejected=counts["rejected"],
-                            uncertain=counts["uncertain"],
-                            duplicates=sum(r.get("export_status") == "duplicate" for r in self.records),
-                        )
-                if any(
-                    r.get("cleanup_pending") or r.get("visualization", {}).get("status") == "error"
-                    for r in self.records
-                ):
-                    raise DataError(
-                        "Artifacts need recovery; resume repairs cleanup/visualization without extra generation"
-                    )
-                self.state["status"] = "completed"
+                if len(self.accepted) < target:
+                    self._segments()
+                self._run_candidates(target)
+                final_status = "completed"
             except KeyboardInterrupt:
-                self.state["status"] = "interrupted"
+                final_status = "interrupted"
+                for pending in self.pending_records():
+                    if not (self.root / f"records/{pending['candidate_id']}.json").exists():
+                        save_attempt(self.root, self._timing(pending, "interrupted", cleanup_state="private"))
             except Exception as exc:
-                self.state.update(
-                    status="failed", last_error={"type": type(exc).__name__, "message": str(exc)}
+                code = (
+                    str(exc)
+                    if str(exc) in ("no_eligible_sources", "consecutive_technical_failures")
+                    else type(exc).__name__
                 )
-                LOG.exception("Run failed; partial results remain in %s", self.root)
+                self.state["last_error"] = {"code": code}
+                LOG.error("Run stopped: %s", code)
             finally:
-                self.backend.close()
+                for backend in self.backends:
+                    backend.close()
                 self.state["segments"][-1]["ended_at"] = now()
-                final_status = self.state["status"]
-                if final_status == "completed":
-                    self.state["status"] = "running"
+                self.state["status"] = final_status
                 self.save_state()
-                from .reporting import export_run, report_run
-
                 try:
+                    from .reporting import export_run, report_run
+
                     if self.backend.provenance != "fake":
                         export_run(self.root)
-                    report_run(self.root, final_status=final_status)
-                    self.state["status"] = final_status
+                    report_run(self.root)
+                    self.clock.finish()
+                    # This final metadata refresh is outside the measured active segment.
+                    report_run(self.root)
+                except Exception as exc:
+                    self.state.update(status="failed", last_error={"code": type(exc).__name__})
+                    if self.clock.state["active"]:
+                        self.clock.finish()
                     self.save_state()
-                except (OSError, DataError) as exc:
-                    self.state.update(
-                        status="failed", last_error={"type": type(exc).__name__, "message": str(exc)}
-                    )
-                    self.save_state()
-                    LOG.exception("Could not finalize export/report")
                     raise
         return self.state

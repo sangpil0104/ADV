@@ -1,0 +1,50 @@
+{
+  "version": "clip_criteria_v1",
+  "status": "active",
+  "language": "en",
+  "score": "cosine_similarity",
+  "pair_pass": "preferred_minus_undesired > 0",
+  "physical_ids": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "minimum_physical_passes": 3,
+  "mandatory_ids": [
+    5
+  ],
+  "require_all_scores_finite": true,
+  "criteria": [
+    {
+      "id": 1,
+      "name_ko": "지면과의 관계",
+      "undesired": "A dashcam image of a vehicle or person floating unnaturally above the road without visible support.",
+      "preferred": "A dashcam image of a vehicle or person naturally supported by the road surface."
+    },
+    {
+      "id": 2,
+      "name_ko": "크기와 원근감",
+      "undesired": "A dashcam image of a vehicle or person that appears excessively large or small for its distance and surroundings.",
+      "preferred": "A dashcam image of a vehicle or person at a realistic scale for its distance and surroundings."
+    },
+    {
+      "id": 3,
+      "name_ko": "도로와의 정렬",
+      "undesired": "A dashcam image of a vehicle positioned at an unnatural angle and location relative to the road layout.",
+      "preferred": "A dashcam image of a vehicle positioned naturally along the road and aligned with its layout."
+    },
+    {
+      "id": 4,
+      "name_ko": "물체 간 겹침",
+      "undesired": "A dashcam image of objects unnaturally fused through one another, with distorted and tangled boundaries.",
+      "preferred": "A dashcam image of distinct objects with clear boundaries and natural occlusion between them."
+    },
+    {
+      "id": 5,
+      "name_ko": "사고 의미 보존",
+      "undesired": "A dashcam image of a normal traffic scene with vehicles traveling along the road.",
+      "preferred": "A dashcam image of a road traffic accident involving one or more vehicles."
+    }
+  ]
+}

@@ -1,82 +1,75 @@
-# DragFlow 편집 설정 시각화
+# 채택 이미지의 편집 설정 시각화
 
-상태: **CPU 렌더러 구현·검증 완료, 실제 DragFlow N=1 실행의 적용값·비교 그림 확인**. `src/advv/visualization.py`와 `configs/advv.example.yaml`을 사용한다. 로컬 미리보기와 실행 이미지는 Git에 포함하지 않으며 [검증 범위](RUN_VERIFICATION.md)를 참고한다.
+기준: [SPEC v0.10](../SPEC.md), 2026-10-11. **CLIP 판정·시간·자유형 영역을 표시하는 renderer를 구현하고 CPU에서 저장/복구를 확인했다. 실제 GPU 편집 품질 검증은 별도다.**
 
-## 1. 기본 화면
+## 1. 무엇을 보여 주는가
 
-각 후보를 생성할 때 다음 PNG를 저장한다. 별도 웹 서버 없이 이미지 뷰어에서 확인한다.
+채택 후보마다 왼쪽은 원본 위의 실제 편집 설정, 오른쪽은 표시 없는 생성 결과를 배치한다. 사용자가 어디를 어떻게 편집하도록 요청했는지 볼 수 있게 한다. 화살표는 지시한 이동이며 실제 물체가 도착했음을 측정한 값이 아니다.
 
-```text
-┌──────────────────────────────┬──────────────────────────────┐
-│ Original + drag settings     │ Generated image              │
-│                              │                              │
-│ 파란 반투명 area와 외곽선     │ 표시 없는 생성 결과          │
-│ 빨간 S ────→ 초록 E         │                              │
-│ start_point   end_point      │                              │
-└──────────────────────────────┴──────────────────────────────┘
-ID / operation / seed / start(x,y) / end(x,y) / area(px,%)
-Physical: YES·NO·UNCERTAIN·PENDING·ERROR·NOT_RUN
-Semantic: YES·NO·UNCERTAIN·PENDING·ERROR·NOT_RUN / final status
-```
+| 표시 | 데이터와 의미 |
+| --- | --- |
+| 빨간 원 `S` | `source_point` / 화면의 start point |
+| 초록 십자 `E` | `target_point` / 화면의 end point |
+| 노란 화살표 | start → end |
+| 반투명 파란 자유형 영역 | `region_mask_path`의 실제 편집 area |
+| 흰 윤곽/차량 ID | 선택한 전체 사고 그룹의 원본 경계/구성 차량 |
+| 초록 목표 윤곽 | 공통 Δ를 적용한 계획 위치; 실제 생성 결과에서 측정한 위치가 아님 |
+| 보라색 `A` | operation에서 필요한 경우 anchor |
+| footer | source/candidate ID, seed, operation, 요청/실제 좌표, 면적, 판정, 시간 |
 
-이미지는 두 패널에 같은 배율로 표시하고 종횡비를 유지한다. 캡션·좌표·범례·상태는 이미지 바깥 여백에 두어 내용을 가리지 않는다. 긴 ID나 문장은 줄바꿈하며 바깥으로 잘라내지 않는다. 축소는 미리보기 크기에만 적용하고 원본·생성 파일은 변경하지 않는다.
+`range`는 자유형 편집 영역의 크기다. `area_pixels`와 원본 전체 면적 대비 비율을 표시하고 이동 거리와 별도 표기한다. segment의 bbox를 area 대신 그리지 않는다. 선택 영역은 모든 변경 픽셀의 정확한 집합이나 정답 GT mask가 아니다.
 
-| 사용자 표기 | 기록의 기준 | 기본 표시 |
-| --- | --- | --- |
-| `start_point` | `source_point` | 빨간 원 + `S`, 좌표 `(x,y)` |
-| `end_point` | `target_point` | 초록 십자 + `E`, 좌표 `(x,y)` |
-| `area` | `region_mask_path`의 실제 mask | 파란 반투명 채움 + 외곽선 |
-| 이동 방향 | start → end | 노란 화살표 + 대비되는 외곽선 |
-| `anchor` | `anchor_point`, 있는 경우 | 보라색 마름모 + `A` |
+## 2. 실제 적용값과 좌표
 
-색상만으로 구분하지 않도록 기호와 범례를 병기한다. 영역은 bounding box로 대체하지 않고 mask의 실제 모양을 표시한다. 면적은 mask의 nonzero pixel 수와 전체 이미지 대비 비율이다. 점이 가깝거나 가장자리에 있어도 라벨과 화살표 끝이 서로 가려지지 않게 배치한다.
+좌표는 EXIF 방향 정규화 후 원본 좌상단 기준 `[x,y]` px다. 저장된 EditRequest와 backend effective geometry를 읽으며 렌더링에서 다시 난수를 뽑지 않는다. 화면용 start/end와 내부 source/target point는 같은 정보다.
 
-화살표는 **요청한 start→end 관계**를 뜻하며 생성 결과에서 그 위치에 실제 도달했음을 증명하지 않는다. 오른쪽 생성 이미지에는 기본적으로 점·화살표를 덧그리지 않는다. rotation/deformation에서는 operation과 요청 회전각·이동량·anchor도 기록하여 단순 평행 이동으로 오인하지 않게 한다.
+upstream resize·feature-grid 반올림·시작점 centroid 교체를 기록한다. 실제 점/영역을 원본 좌표계로 역변환한 뒤 패널 배율·여백을 적용한다. binary mask는 nearest-neighbor로 변환하고 upstream의 soft mask 및 nonzero 영역과 구분한다. 요청값과 실제값이 다르면 양쪽 값과 범례를 명시한다.
 
-## 2. 실제 전달값과 좌표 정합성
+자유형/비볼록 segment는 centroid가 영역 밖일 수 있다. 그룹 가상 중심은 객체 밖에 있어도 유효하다. 전체 mask가 backend에 전달되고 공통 Δ가 보존되어야 하며, 그림만 수정하여 정상 실행처럼 보이게 하지 않는다. adapter가 확인한 실제 값을 확보하지 못하면 `REQUESTED / NOT EXECUTED`로 표시하며 채택 완료의 증거로 쓰지 않는다.
 
-시각화 함수 안에서 영역·점을 다시 무작위로 뽑지 않는다. 저장된 계획과 backend adapter가 남긴 effective instruction에서 값을 읽는다. internal field와 화면 표기의 관계는 위 표로 고정하며 `start_point`와 `source_point`를 독립 수정 가능한 두 값으로 저장하지 않는다.
+생성 전에 `segments/<source_id>/selection.png`를 저장한다. 초록 mask는 선택, 빨강은 제외된 차량 후보이며 ID를 표시한다. 이 원본 진단은 후보별 탈락 이미지와 구분해 보존한다. 선택이 불확실하거나 차량이 빠졌다면 일반화 성공으로 보고하지 않는다.
 
-좌표는 EXIF 방향 정규화 후 원본의 좌상단을 원점으로 하는 `[x,y]`다. backend의 리사이즈·패딩·양자화된 좌표/영역을 정규화 원본으로 역변환한 뒤, 미리보기 패널의 배율과 여백 offset을 적용한다. mask는 nearest-neighbor로 변환하고 반투명 채움은 그 이후 수행한다. 화면상 좌표와 footer 수치는 서로 다른 단위가 되지 않도록 footer에는 **정규화 원본 px**라고 명시한다.
+채택 metadata와 footer에는 차량별 외형 template 매칭 이동 추정·잔차를 표시한다. 매칭 불가능하면 `unmeasurable`이며, 이 진단은 실제 사고 차량 동일성·이동 성공의 자동 인증이 아니다.
 
-`metadata.json`에 최소한 source/candidate/plan ID와 hash, 정규화 원본 크기, backend 입력 크기, 요청 좌표·mask hash, 실제 전달 좌표·mask hash, 전처리/역변환, 표시 좌표, 면적과 계산 좌표계, seed, operation, 두 VQA 상태, 렌더링 버전·설정 hash·파일 경로를 남긴다. 요청값과 실제값이 다르면 그 사실과 두 값을 footer 또는 보조 설명에 함께 표시한다.
+## 3. CLIP와 시간 표시
 
-`area`는 선택한 편집 영역을 뜻한다. upstream이 별도로 확장한 gradient mask나 추정한 target region이 있으면 이름과 범례를 구분한다. 선택 영역이 생성 중 변화한 모든 픽셀과 정확히 같다고 표시하지 않는다. 실제 전달값을 확보하지 못했다면 요청값으로 그린 그림에는 `REQUESTED / NOT EXECUTED`를 표시하고 실행 설정 검증을 완료했다고 보고하지 않는다.
+채택 결과의 footer/metadata에 5항목 각각 A/B cosine, B−A margin, pass 여부를 연결한다. 1–4 통과 개수와 5번 필수 통과를 표시한다. 점수를 확률이나 물리적 안전 인증으로 표기하지 않는다. 5번은 일반 사고 의미이며 추돌 전용/원본 사고 유형 동일성 검사라고 쓰지 않는다.
 
-## 3. 저장 위치와 시점
+현재 시도의 `attempt_elapsed_seconds`와 앞선 실패를 포함한 `accepted_cost_seconds`를 구분해 표시한다. 예: `이번 시도 60초 / 실패 포함 획득 150초`. 아직 commit 비용이 확정되지 않은 private preview를 최종 시간으로 공개하지 않는다. 실행 전체의 초기화/마지막 overhead와 pending은 report에서 설명한다.
+
+`metadata.json`에는 source/candidate/plan hash, 원본·backend 크기, 요청/실제 점과 mask hash, 변환 정보, 면적 단위, segment ID, 모델/문장 hash, CLIP 판정, 시간 완전성, 렌더링 버전을 남긴다. 그림의 숫자와 accepted record가 같은 commit을 참조하도록 한다.
+
+## 4. 저장 시점과 삭제
+
+v0.4.1은 개별 파일을 아래의 종류별 폴더에 저장한다. `generated_grid.png`는 전체 채택 이미지를 종횡비를 유지해 배치하고, `generated_grid.json`은 번호·ID·이미지 hash를 제공한다. `drag_plan_grid.png`는 같은 순서로 대응하는 계획 모음이며 **화살표·mask를 표시한 사진만** 보여준다. 제목·설명·점수·ID·S/E/A 문자·차량 번호를 생략하고 원본 사진에 이미 있는 문자는 유지한다. 저장된 원본과 geometry를 CPU로 렌더링하며 개별 계획 PNG의 설명은 그대로 보존한다. `drag_plan_grid.json`은 번호·ID·개별 계획 경로/hash·렌더링 입력 identity·검증 상태를 제공한다. `index.json`은 모음과 개별 시각화 파일의 목록이다. 0장인 drag plan 모음은 글씨 없는 빈 배경이다.
 
 ```text
-runs/<run_id>/visualizations/<candidate_id>/
-├── drag_plan.png     # 원본 + 실제 start/end/area 표시
-├── comparison.png    # 왼쪽 drag_plan의 이미지, 오른쪽 생성 결과, 하단 정보
-└── metadata.json     # 좌표·mask·전처리·판정·렌더링 상태
+assets/outputs/<run_id>/visualizations/
+├── comparison/<candidate_id>.png
+├── drag_plan/<candidate_id>.png
+├── metadata/<candidate_id>.json
+├── generated_grid.png
+├── generated_grid.json
+├── drag_plan_grid.png
+├── drag_plan_grid.json
+└── index.json
 ```
 
-계획 저장 후 요청값 기준 preview를 만들 수 있다. 실제 backend 입력이 확정되면 drag_plan을 갱신하고, 정상 생성 후 comparison을 저장한다. 아직 VQA를 실행하지 않았으면 `PENDING`, 선행 탈락으로 건너뛴 검증은 `NOT_RUN`이다. 최종 판정 후 동일 후보의 footer와 metadata만 원자적으로 갱신한다.
+`gallery.py`와 `visualization_collection.py`는 저장된 채택 record만 읽어 CPU에서 두 모음을 만든다. 신규 채택 commit 및 종료/report 때 갱신하며 hash가 같으면 모음 이미지를 재사용한다. 탈락·중복·미완료 후보를 포함하지 않는다. Qwen 과거 채택은 `legacy_unverified`로 구분한다.
 
-시각화는 원본·생성 이미지를 복사하여 그린다. **모델 입력과 dataset export는 표시 없는 파일**을 참조한다. visualization 경로는 별도 artifact 링크로만 기록하고 학습 manifest의 `image_path`나 hash·중복 검사·목표 N에 섞지 않는다. report에서 candidate ID별 확인용 파일 링크를 제공한다.
+`advv visualize --all`은 기존 `assets/outputs`와 `runs`의 파일을 재정리한다. PNG 바이트를 그대로 복사하고 metadata의 경로/layout, record의 시각화 경로, report/export 링크를 갱신한 뒤 일치 확인된 옛 파일을 제거한다. 원본·생성 사진·판정·시간·plan/effective는 보존한다. 중단 후 같은 명령으로 복구하며 활성 writer·충돌 파일·알 수 없는 사용자 파일은 보호한다. 이 재정리는 재추론이나 CLIP 재판정을 하지 않는다.
 
-## 4. 판정별 보존과 복구
+판정 전 결과는 private staging에만 둔다. CLIP 통과·고유성 확인 후 그림을 준비하여 accepted transaction으로 공개한다. **탈락 후보는 원본 설정 PNG도 포함해 아무 시각화도 보존하지 않는다.** 후보 mask·비교 PNG·썸네일·임시 복사본·상세 metadata도 삭제한다. 과거의 “NO여도 원본 설정 그림은 보존” 정책은 폐기한다.
 
-| 상태 | 원본 설정 PNG | 생성 결과 포함 comparison PNG |
-| --- | --- | --- |
-| accepted | 보존 | 보존 |
-| uncertain / 검증 오류 | 보존 | 해당 후보 이미지 보관 정책에 따라 보존 |
-| rejected, 기본 NO 삭제 활성 | 보존 | 삭제; 썸네일·임시 복사본도 함께 삭제 |
-| rejected, 명시적 연구용 이미지 보관 | 보존 | 보존 가능; REJECTED 표시 |
-| 생성 실패, 후보 없음 | 요청값 preview와 실패 상태 보존 | 생성하지 않음 |
+기존 run의 명시적 비채택 시각화도 실행 시작 시 정리 대상이다. 원본·accepted와 공유하는 자원을 삭제하지 않으며 알 수 없는 상태는 추정 삭제하지 않는다. report/export에서 삭제한 파일의 링크를 없애고 재생성하지 않는다. 남는 것은 이미지 없는 최소 시간/상태 장부다.
 
-`visualization.rejected_comparison_policy=follow_image_retention`으로 기존 생성 이미지 보관 정책을 따른다. 원본 설정 PNG에는 후보의 픽셀을 포함하지 않으므로 NO 삭제 후에도 실패한 설정을 볼 수 있다. 삭제한 comparison을 재개/리포트 생성 때 복원하거나 dangling 링크를 남기지 않는다.
+시각화는 이미지 복사본에 그린다. DragFlow·CLIP 입력, pixel hash/중복 검사, 학습 export에는 표시 없는 이미지를 사용한다. 렌더링만 실패하면 유효한 private 생성 결과에서 복구하고 추가 생성·CLIP 호출·quota 증가를 하지 않는다. 필수 그림이 준비되기 전에는 해당 accepted commit을 완료하지 않는다.
 
-렌더링 실패는 `visualization_error`로 별도 기록하고 원본·후보·VQA 판정은 보존한다. 시각화 복구를 위해 DragFlow나 Qwen을 다시 실행하지 않는다. 기본 활성화 상태에서는 필요한 시각화 저장까지 완료해야 run 완료로 보고하며, 이미 채운 N장을 추가로 생성하지 않는다.
+## 5. 구현 검증
 
-## 5. 구현 시 확인 사항
-
-- 직사각형 이미지, EXIF 회전, 패딩·리사이즈, 가장자리 좌표에서 점·mask가 같은 위치를 가리키는지 확인한다.
-- backend 좌표 반올림 후에도 실제 전달값을 표시하고 mask 면적 계산의 좌표계를 기록한다.
-- 가까운 start/end, 작은 area, anchor가 있는 회전·변형의 표시가 읽히는지 확인한다.
-- 원본·후보 hash와 VQA 실제 입력이 렌더링 전후 동일한지 검사한다.
-- NO 삭제 후 comparison/thumbnail에 후보 픽셀이 남지 않고, source-only drag_plan은 유지되는지 검사한다.
-- 시각화만 실패한 뒤 재개해도 generation/verification 호출과 accepted count가 늘어나지 않는지 검사한다.
-
-고정 upstream의 deformation에는 독립적인 scale 입력이 없다. displacement로 설정하며 이를 scale 파라미터처럼 표시하지 않는다. 실제 feature 영역의 bilinear soft mask는 `effective_region.npy`, nonzero 영역을 원본 크기로 nearest 변환한 표시는 `effective_area.png`로 저장한다.
+- 가로가 긴 블랙박스 프레임, EXIF 회전, 패딩/resize에서 mask·점이 일치하는지 확인한다.
+- 비볼록 자유형 영역과 작은 mask에서 요청 start와 upstream centroid의 차이를 그대로 보여 준다.
+- 면적과 이동 거리를 구분하고 segment 경계·edit area·gradient 확대 영역의 범례를 섞지 않는다.
+- 렌더링 전후 생성/CLIP/학습 입력의 hash가 바뀌지 않는지 검사한다.
+- 탈락·중복·오류 정리 후 모든 후보별 시각화와 링크가 없고 시간 장부만 남는지 검사한다.
+- 채택 commit 직전 중단 뒤 재개해도 그림만 복구하고 비용/수량을 중복 집계하지 않는지 확인한다.

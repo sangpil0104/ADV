@@ -4,19 +4,22 @@ import json
 import math
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import yaml
 
 from .backends.dragflow import ALLOWED_PARAMETERS
-from .config import validate_config
+from .config import gpu_groups, validate_config
 from .errors import ConfigError
+from .environment import require_advv
 from .ingest import scan_sources
 from .prepare import git_revision, verify_weights
 from .storage import digest, file_hash
 
 
 def preflight(cfg: dict, *, check_inputs=True) -> dict:
+    environment = require_advv()
     validate_config(cfg)
     if not cfg["run"]["target_count"]:
         raise ConfigError("Specify total N with 'advv run N' or --target-count N")
@@ -66,12 +69,6 @@ def preflight(cfg: dict, *, check_inputs=True) -> dict:
     if merged["skip_step_num"] >= min(merged["inversion_step_num"], merged["sampling_step_num"]):
         raise ConfigError("skip_step_num must be below inversion and sampling steps")
     required = {
-        "Qwen/Qwen3.5-4B": [
-            "config.json",
-            "model.safetensors.index.json",
-            "preprocessor_config.json",
-            "chat_template.jinja",
-        ],
         "black-forest-labs/FLUX.1-dev": [
             "ae.safetensors",
             "transformer/config.json",
@@ -82,7 +79,11 @@ def preflight(cfg: dict, *, check_inputs=True) -> dict:
         "Tencent/InstantCharacter": ["instantcharacter_ip-adapter.bin"],
         "google/siglip-so400m-patch14-384": ["model.safetensors", "preprocessor_config.json"],
         "facebook/dinov2-giant": ["model.safetensors", "preprocessor_config.json"],
-        "openai/clip-vit-large-patch14": ["model.safetensors", "tokenizer_config.json"],
+        "openai/clip-vit-large-patch14": [
+            "model.safetensors",
+            "tokenizer_config.json",
+            "preprocessor_config.json",
+        ],
     }
     for model, filenames in required.items():
         root = Path(weights["models"][model]["path"])
@@ -94,18 +95,16 @@ def preflight(cfg: dict, *, check_inputs=True) -> dict:
                 for shard in set(json.loads(path.read_text())["weight_map"].values()):
                     if not (path.parent / shard).is_file():
                         raise ConfigError(f"Missing model shard: {path.parent / shard}")
-    env = dict(
-        os.environ, CUDA_VISIBLE_DEVICES=",".join(gpus[:2]), HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1"
-    )
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES="", HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1")
     environments = {}
     probes = {
         "generator": 'import sys; sys.path.insert(0,"framework"); from dragger import Dragger; import torch; print(torch.__version__)',
-        "verifier": "from transformers import Qwen3_5ForConditionalGeneration; import torch, transformers; print(torch.__version__, transformers.__version__)",
+        "verifier": "from transformers import CLIPModel, CLIPProcessor; import torch, transformers; print(torch.__version__, transformers.__version__)",
+        "segmenter": "from torchvision.models.detection import MaskRCNN; import torchvision; print(torchvision.__version__)",
     }
     for kind, code in probes.items():
-        interpreter = cfg["execution"].get(kind + "_python")
-        if not interpreter or not Path(interpreter).is_file():
-            raise ConfigError(f"Missing {kind} Python environment")
+        interpreter = sys.executable
+        code = "from advv.environment import require_advv; require_advv(); " + code
         result = subprocess.run(
             [interpreter, "-c", code], cwd=repo, env=env, capture_output=True, text=True, timeout=120
         )
@@ -114,7 +113,7 @@ def preflight(cfg: dict, *, check_inputs=True) -> dict:
         packages = subprocess.run(
             [interpreter, "-m", "pip", "freeze"], capture_output=True, text=True, check=True
         ).stdout
-        environments[kind] = {"versions": result.stdout.strip(), "packages": packages}
+        environments[kind] = {"versions": result.stdout.strip(), "packages": packages, **environment}
     frozen = {
         "_upstream_config": upstream,
         "_upstream_config_sha256": file_hash(Path(upstream_path)),
@@ -127,7 +126,12 @@ def preflight(cfg: dict, *, check_inputs=True) -> dict:
         if key in cfg and cfg[key] != value:
             raise ConfigError(f"Pinned runtime changed ({key}); start a new run or restore dependencies")
     cfg.update(frozen)
-    result = {"status": "ready", "gpus": [available[x] for x in gpus], "environments": environments}
+    result = {
+        "status": "ready",
+        "gpus": [available[x] for x in gpus],
+        "gpu_groups": gpu_groups(gpus),
+        "environments": environments,
+    }
     if check_inputs:
         _, result["inputs"] = scan_sources(cfg)
     return result

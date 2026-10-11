@@ -12,10 +12,19 @@ models/
 third_party/
 configs/advv.local.yaml
 *.log
+*.pid
+/images.zip
 
 # Local inputs, verification outputs and presentation artifacts
 assets/*
 !assets/.gitkeep
+!assets/inputs/
+assets/inputs/*
+!assets/inputs/.gitkeep
+!assets/outputs/
+assets/outputs/*
+!assets/outputs/.gitkeep
+/inputs/
 integration_checks/
 presentation/
 *.pptx

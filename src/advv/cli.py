@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import logging
 import signal
+import time
+from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from .backends.process import LocalBackend
-from .config import load_config, parse_gpus
+from .config import DEFAULT_CONFIG_PATH, PROJECT_ROOT, gpu_groups, load_config, parse_gpus
+from .config import validate_config
+from .cleanup import cleanup_existing_runs
+from .environment import require_advv
 from .errors import ADVVError
 from .pipeline import Pipeline, create_run
 from .preflight import preflight
@@ -32,21 +39,33 @@ def main(argv=None):
 
     signal.signal(signal.SIGTERM, interrupted)
     parser = argparse.ArgumentParser(
-        prog="advv", description="DragFlow augmentation with local Qwen verification"
+        prog="advv", description="Dashcam accident augmentation with DragFlow and paired CLIP"
     )
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("run", "preflight"):
         p = sub.add_parser(name)
-        p.add_argument("--config", type=Path, default=Path("configs/advv.local.yaml"))
-        p.add_argument("--input-dir", type=Path)
+        p.add_argument(
+            "--config",
+            type=Path,
+            default=DEFAULT_CONFIG_PATH,
+            help="Optional config override; defaults to the installed project config",
+        )
         p.add_argument(
             "--target-count",
             type=positive_count,
             metavar="N",
-            help="Total new, unique images that pass both VQA checks",
+            help="Total new, unique images passing CLIP 3-of-4 AND mandatory accident criterion",
         )
-        p.add_argument("--gpus", required=True, help="Allowed physical IDs, e.g. 0,1,2,3,4,5,6,7")
+        p.add_argument(
+            "--gpus", required=True, help="Physical GPU pairs, e.g. 4,5,6,7 runs two candidates in parallel"
+        )
+        p.add_argument(
+            "--image",
+            metavar="FILE",
+            help="Augment only this file relative to assets/inputs (e.g. image1.png); default: all inputs",
+        )
         if name == "run":
+            p.add_argument("--prompt", help="Optional augmentation instruction; CLIP criteria stay fixed")
             p.add_argument(
                 "count",
                 type=positive_count,
@@ -54,15 +73,19 @@ def main(argv=None):
                 metavar="N",
                 help="Total accepted images to collect across all inputs (e.g. advv run 10)",
             )
-            p.add_argument("--run-id")
+            p.add_argument("--run-id", help="Optional run name; generated automatically if omitted")
             p.add_argument("--run-dir", type=Path)
             p.add_argument("--resume", action="store_true")
     p = sub.add_parser("prepare", help="Download the pinned models; inference remains offline")
     p.add_argument("--project", type=Path, default=Path.cwd())
-    p.add_argument("--only", choices=["all", "qwen", "dragflow", "support"], default="all")
+    p.add_argument("--only", choices=["all", "clip", "segmenter", "dragflow", "support"], default="all")
     for name in ("export", "report"):
         p = sub.add_parser(name)
         p.add_argument("--run-dir", type=Path, required=True)
+    p = sub.add_parser("visualize", help="Group previews by kind and build an image overview without inference")
+    group = p.add_mutually_exclusive_group(required=True)
+    group.add_argument("--run-dir", type=Path)
+    group.add_argument("--all", action="store_true", help="Include assets/outputs and legacy runs")
     args = parser.parse_args(argv)
     if args.command == "run":
         if args.count is not None and args.target_count is not None:
@@ -71,10 +94,36 @@ def main(argv=None):
             args.target_count = args.count
         if args.resume and args.target_count is not None:
             parser.error("Resume uses the saved target count; omit N and --target-count")
+        if args.prompt is not None and not args.prompt.strip():
+            parser.error("--prompt must be nonempty text")
+        if args.resume and args.prompt is not None:
+            parser.error("Resume uses the saved prompt; omit --prompt or start a new run")
+        if args.resume and args.image is not None:
+            parser.error("Resume uses the saved image selection; omit --image or start a new run")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
+        require_advv()
+        started = time.monotonic()
         if args.command == "prepare":
             prepare(args.project, only=args.only)
+            return 0
+        if args.command == "visualize":
+            from .storage import run_lock
+            from .visualization_collection import build_all_collections, build_collection
+
+            if args.all:
+                print(json.dumps(build_all_collections(PROJECT_ROOT), ensure_ascii=False, indent=2))
+            else:
+                root = args.run_dir.resolve()
+                with run_lock(root):
+                    result = build_collection(root)
+                print(
+                    json.dumps(
+                        {"run_dir": str(root), "count": result["count"], "artifacts": result["artifacts"]},
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
             return 0
         if args.command in ("report", "export"):
             from .storage import run_lock
@@ -84,16 +133,37 @@ def main(argv=None):
                 print((report_run if args.command == "report" else export_run)(root))
             return 0
         if args.command == "run" and args.resume:
-            if not args.run_dir or args.run_id or args.input_dir or args.target_count is not None:
+            if not args.run_dir or args.run_id or args.target_count is not None:
                 raise ADVVError("Resume requires --run-dir and --gpus; input/N changes require a new run")
             root = args.run_dir.resolve()
             cfg = read_json(root / "config.json")
+            validate_config(cfg)
             cfg["execution"]["selected_gpu_ids"] = parse_gpus(args.gpus)
+            gpu_groups(args.gpus)
+            cleanup_existing_runs(Path(cfg["run"]["output_root"]), exclude=root)
             preflight(cfg, check_inputs=False)
+            initial_seconds = time.monotonic() - started
         else:
             cfg = load_config(
-                args.config, input_dir=args.input_dir, target_count=args.target_count, gpus=args.gpus
+                args.config,
+                target_count=args.target_count,
+                gpus=args.gpus,
+                prompt=getattr(args, "prompt", None),
+                image=args.image,
             )
+            if args.command == "run":
+                if args.run_dir:
+                    raise ADVVError("Use --run-dir only with --resume")
+                if not args.run_id:
+                    args.run_id = datetime.now(timezone.utc).strftime("run_%Y%m%dT%H%M%SZ_") + uuid4().hex[:8]
+                from .storage import safe_id
+
+                safe_id(args.run_id)
+                if (Path(cfg["run"]["output_root"]) / args.run_id).exists():
+                    raise ADVVError("Run ID already exists; choose a new ID or --resume")
+                if not cfg["run"]["target_count"]:
+                    raise ADVVError("Specify a positive total N")
+                cleanup_existing_runs(Path(cfg["run"]["output_root"]))
             checks = preflight(cfg)
             if args.command == "preflight":
                 print(
@@ -103,11 +173,23 @@ def main(argv=None):
                     )
                 )
                 return 0
-            if not args.run_id or args.run_dir:
-                raise ADVVError("New run requires --run-id; use --run-dir only with --resume")
-            root = create_run(cfg, args.run_id, provenance=LocalBackend.provenance)
-        backend = LocalBackend(cfg, root)
-        state = Pipeline(root, backend, gpu_ids=cfg["execution"]["selected_gpu_ids"]).run()
+            root = create_run(
+                cfg,
+                args.run_id,
+                provenance=LocalBackend.provenance,
+                initial_seconds=time.monotonic() - started,
+            )
+            initial_seconds = 0.0
+        groups = gpu_groups(cfg["execution"]["selected_gpu_ids"])
+        backends = []
+        for group in groups:
+            lane_cfg = copy.deepcopy(cfg)
+            lane_cfg["execution"]["selected_gpu_ids"] = group
+            backends.append(LocalBackend(lane_cfg, root))
+        logging.info("Run: %s | GPU groups: %s | Shared target: %s", root, groups, cfg["run"]["target_count"])
+        state = Pipeline(
+            root, backends, gpu_ids=cfg["execution"]["selected_gpu_ids"], initial_seconds=initial_seconds
+        ).run()
         print(
             json.dumps(
                 {

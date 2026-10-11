@@ -1,0 +1,8 @@
+name: ADVV
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - -r advv-requirements.txt

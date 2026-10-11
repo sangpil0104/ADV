@@ -10,6 +10,19 @@ from .storage import atomic_image, digest, file_hash, load_rgb, pixel_hash, safe
 EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 
 
+def selected_image_path(dataset: dict) -> Path | None:
+    selection = dataset.get("image")
+    if selection is None:
+        return None
+    folder = Path(dataset["input_dir"]).resolve()
+    path = within(folder, selection, must_exist=True)
+    if path.suffix.lower() not in EXTENSIONS:
+        raise DataError(f"Unsupported --image format: {selection}")
+    if not path.resolve().is_relative_to(Path(dataset["root"]).resolve()):
+        raise DataError("Selected image escapes dataset root")
+    return path
+
+
 def scan_sources(cfg: dict) -> tuple[list[Source], dict]:
     import json
 
@@ -20,7 +33,9 @@ def scan_sources(cfg: dict) -> tuple[list[Source], dict]:
         if not folder.is_dir():
             raise DataError(f"Input folder does not exist: {folder}")
         rows = []
-        for path in sorted(folder.rglob("*")):
+        selected = selected_image_path(d)
+        paths = [selected] if selected is not None else sorted(folder.rglob("*"))
+        for path in paths:
             if path.is_file() and path.suffix.lower() in EXTENSIONS:
                 if not path.resolve().is_relative_to(root):
                     raise DataError(f"Input file escapes dataset root: {path}")
@@ -33,7 +48,7 @@ def scan_sources(cfg: dict) -> tuple[list[Source], dict]:
                         split="source",
                         group_id=sid,
                         group_inferred=True,
-                        domain="unspecified",
+                        domain="dashcam_accident",
                         preserve_hint=None,
                         label=None,
                     )
@@ -43,8 +58,8 @@ def scan_sources(cfg: dict) -> tuple[list[Source], dict]:
         for line in Path(d["manifest"]).read_text(encoding="utf-8").splitlines():
             if line.strip():
                 row = json.loads(line)
-                if row.get("schema_version") != "1.1":
-                    raise DataError("Source manifest schema_version must be 1.1")
+                if row.get("schema_version") not in ("1.1", "2.0"):
+                    raise DataError("Source manifest schema_version must be 1.1 or 2.0")
                 rows.append(row)
     if not rows:
         raise DataError("No supported input images")

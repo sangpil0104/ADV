@@ -1,11 +1,14 @@
+"""Accepted-only reports and exports; failures appear only as counts and minimal timing."""
+
 from __future__ import annotations
 
-import html
+import json
 from collections import Counter
 from pathlib import Path
 
 from .errors import DataError
 from .storage import atomic_bytes, atomic_json, file_hash, pixel_hash, read_json, within
+from .timing import attempts_for
 from .verifiers.decision import decide
 
 
@@ -13,25 +16,33 @@ def records_for(run_dir):
     return sorted([read_json(p) for p in (run_dir / "records").glob("*.json")], key=lambda r: r["sequence"])
 
 
-def export_run(run_dir: Path) -> Path:
-    import json
+def accepted_records(run_dir):
+    return [
+        r
+        for r in records_for(run_dir)
+        if r.get("export_status") == "eligible"
+        and (r.get("schema_version") != "2.0" or r.get("presentation_complete"))
+    ]
 
+
+def export_run(run_dir: Path) -> Path:
     manifest = read_json(run_dir / "manifest.json")
-    if manifest["backend"] != "dragflow+qwen_local":
+    if manifest["backend"] not in ("dragflow+clip_local", "dragflow+qwen_local"):
         raise DataError("Production export refuses fake or unrecognized backends")
+    legacy = manifest["schema_version"] == "1.1"
     sources = {s["source_id"]: s for s in read_json(run_dir / "sources.json")}
     seen = {s["pixel_sha256"] for s in sources.values()}
+    cfg = read_json(run_dir / "config.json")
     rows = []
-    for r in records_for(run_dir):
-        if r.get("export_status") != "eligible":
-            continue
+    for r in accepted_records(run_dir):
         source = sources[r["source_id"]]
-        if (
-            r["backend"] != manifest["backend"]
-            or decide(r["checks"]) != "accepted"
-            or source["split"] not in ("source", "train")
-        ):
+        if r["backend"] != manifest["backend"] or source["split"] not in ("source", "train"):
             raise DataError("Ineligible record in export")
+        if not legacy and (
+            decide(r["clip"]) != "accepted"
+            or r["clip"]["criteria_sha256"] != cfg["_assets"]["criteria_sha256"]
+        ):
+            raise DataError("Invalid CLIP decision in export")
         path = within(run_dir, r["image_path"], must_exist=True)
         pixels = pixel_hash(path)
         if pixels != r["pixel_sha256"] or file_hash(path) != r["file_sha256"] or pixels in seen:
@@ -39,7 +50,7 @@ def export_run(run_dir: Path) -> Path:
         seen.add(pixels)
         rows.append(
             {
-                "schema_version": "1.1",
+                "schema_version": manifest["schema_version"],
                 "candidate_id": r["candidate_id"],
                 "source_id": r["source_id"],
                 "image_path": r["image_path"],
@@ -49,113 +60,126 @@ def export_run(run_dir: Path) -> Path:
                 "domain": source["domain"],
                 "label": None,
                 "task": "image_only",
+                "edit_task": r.get("plan", {}).get("sampler_version"),
+                "accident_vehicle_ids": (r.get("plan", {}).get("accident_group") or {}).get("member_ids"),
+                "motion_diagnostics": r.get("generation_info", {}).get("motion_diagnostics"),
                 "pixel_sha256": pixels,
                 "file_sha256": r["file_sha256"],
                 "backend": r["backend"],
+                "verification_status": "legacy_unverified" if legacy else "clip_verified",
                 "record_path": f"records/{r['candidate_id']}.json",
                 "visualization_artifacts": r.get("visualization", {}).get("artifacts", {}),
+                "timing": r.get("timing"),
             }
         )
     destination = run_dir / "exports/images.jsonl"
-    atomic_bytes(destination, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows).encode())
+    payload = "".join(json.dumps(r, ensure_ascii=False, allow_nan=False) + "\n" for r in rows).encode()
+    if legacy:
+        atomic_bytes(run_dir / "exports/legacy_images.jsonl", payload)
+        atomic_bytes(destination, b"")  # legacy images do not enter the CLIP dataset
+    else:
+        atomic_bytes(destination, payload)
     return destination
 
 
 def report_run(run_dir: Path, *, final_status=None) -> Path:
+    from .visualization_collection import build_collection
+
     state = read_json(run_dir / "state.json")
-    if final_status is not None:
-        state["status"] = final_status
-    records = records_for(run_dir)
-    counts = dict(Counter(r["status"] for r in records))
-    sources = read_json(run_dir / "sources.json")
-    per_source = {}
-    for source in sources:
-        subset = [r for r in records if r["source_id"] == source["source_id"]]
-        per_source[source["source_id"]] = {
-            "attempts": len(subset),
-            "accepted": sum(r.get("export_status") == "eligible" for r in subset),
-        }
-    accepted = sum(r.get("export_status") == "eligible" for r in records)
-    physical_no = sum(
-        r.get("checks", {}).get("physical", {}).get("response", {}).get("answer") == "NO"
-        for r in records
-        if r.get("checks", {}).get("physical", {}).get("response")
-    )
-    semantic_no = sum(
-        r.get("checks", {}).get("semantic", {}).get("response", {}).get("answer") == "NO"
-        for r in records
-        if r.get("checks", {}).get("semantic", {}).get("response")
-    )
     cfg = read_json(run_dir / "config.json")
+    manifest = read_json(run_dir / "manifest.json")
+    legacy = manifest["schema_version"] == "1.1"
+    collection = build_collection(run_dir)
+    accepted = accepted_records(run_dir)
+    entries = attempts_for(run_dir)
+    counts = dict(Counter(r["outcome"] for r in entries))
+    sources = read_json(run_dir / "sources.json")
+    timer = read_json(run_dir / "timings/state.json") if (run_dir / "timings/state.json").exists() else {}
+    total = timer.get("run_active_seconds")
+    count = 0 if legacy else len(accepted)
     result = {
         "run_id": run_dir.name,
-        "backend": read_json(run_dir / "manifest.json")["backend"],
-        "status": state["status"],
-        "accepted": accepted,
+        "backend": manifest["backend"],
+        "schema_version": manifest["schema_version"],
+        "edit_task": cfg.get("sampler", {}).get("version"),
+        "status": final_status or state["status"],
+        "accepted": count,
+        "legacy_unverified": len(accepted) if legacy else 0,
         "target": cfg["run"]["target_count"],
-        "attempts": len(records),
+        "attempts": len(entries),
         "status_counts": counts,
-        "physical_no": physical_no,
-        "semantic_no": semantic_no,
-        "duplicates": sum(r.get("export_status") == "duplicate" for r in records),
-        "acceptance_rate": accepted / len(records) if records else None,
-        "per_source": per_source,
-        "last_error": state.get("last_error"),
-        "cleanup_pending": [r["candidate_id"] for r in records if r.get("cleanup_pending")],
-        "visualization_errors": [
-            r["candidate_id"] for r in records if r.get("visualization", {}).get("status") == "error"
+        "run_active_seconds": total,
+        "timing_basis": "shared_run_active_wall_seconds" if not legacy else "legacy_partial",
+        "execution_segments": state.get("segments", []),
+        "pending_cost_seconds": timer.get("pending_cost_seconds"),
+        "timing_complete": timer.get("timing_complete", False),
+        "mean_active_seconds_per_accepted": total / count if count and total is not None else None,
+        "per_source": {
+            s["source_id"]: {
+                "attempts": sum(e["source_id"] == s["source_id"] for e in entries),
+                "accepted": sum(r["source_id"] == s["source_id"] for r in accepted) if not legacy else 0,
+            }
+            for s in sources
+        },
+        "last_error": {
+            "code": state["last_error"].get("code", state["last_error"].get("type", "legacy_error"))
+        }
+        if state.get("last_error")
+        else None,
+        "cleanup_pending_count": sum(
+            read_json(p).get("state") == "pending" for p in (run_dir / "cleanup").glob("*.json")
+        ),
+        "accepted_images": [
+            {
+                "candidate_id": r["candidate_id"],
+                "image_path": r["image_path"],
+                "timing": r.get("timing"),
+                "verification_status": "legacy_unverified" if legacy else "clip_verified",
+                "motion_diagnostics": r.get("generation_info", {}).get("motion_diagnostics"),
+            }
+            for r in accepted
         ],
     }
-    profiles = [read_json(p) for p in (run_dir / "profiles").glob("*.json")]
-    stage_seconds = {
-        "generation": sum(
-            a.get("elapsed_seconds", 0) for r in records for a in r.get("generation_attempts", [])
-        )
+    result["visualization_collection"] = {
+        "count": collection["count"],
+        "artifacts": collection["artifacts"],
+        "verification_status": collection["verification_status"],
     }
-    for stage, owners in [("profile", profiles), ("physical", records), ("semantic", records)]:
-        stage_seconds[stage] = sum(
-            a.get("elapsed_seconds", 0)
-            for owner in owners
-            for a in owner.get("checks", {}).get(stage, {}).get("attempts", [])
-        )
-    result["stage_elapsed_seconds"] = stage_seconds
-    result["peak_vram_bytes"] = {
-        "generator_max_single_logical_device": max(
-            [v for r in records for v in r.get("generation_info", {}).get("peak_vram_bytes", [])] or [0]
-        ),
-        "qwen_max_single_logical_device": max(
-            [
-                a.get("info", {}).get("peak_vram_bytes", 0)
-                for owner in records + profiles
-                for c in owner.get("checks", {}).values()
-                for a in c.get("attempts", [])
-            ]
-            or [0]
-        ),
-    }
+    atomic_bytes(
+        run_dir / "timings/attempts.jsonl",
+        "".join(json.dumps(e, ensure_ascii=False, allow_nan=False) + "\n" for e in entries).encode(),
+    )
     atomic_json(run_dir / "report.json", result)
     lines = [
         f"# ADVV {run_dir.name}",
         "",
-        f"Status: **{state['status']}** | Backend: `{result['backend']}`",
+        f"Status: **{result['status']}** | Backend: {manifest['backend']}",
         "",
-        f"Accepted: **{accepted}/{result['target']}** | Attempts: {len(records)} | Duplicates: {result['duplicates']}",
+        f"CLIP accepted: **{count}/{result['target']}** | Attempts: {len(entries)}",
+        f"Outcome counts: {counts}",
         "",
-        "Qwen judgments are visual estimates, not physical proof or supervised ground truth.",
+        f"Active seconds: {total} | Pending seconds: {result['pending_cost_seconds']}",
+        f"Active seconds / accepted: {result['mean_active_seconds_per_accepted']}",
         "",
-        "| Candidate | Final status | Export | Preview |",
-        "| --- | --- | --- | --- |",
+        "CLIP is a visual proxy, not proof of physical laws or exact accident-type preservation.",
+        "Whole-group masks/translation are input contracts. Output vehicle motion is diagnosed separately, not certified by CLIP.",
+        " / ".join(f"[{kind}]({path})" for kind, path in collection["artifacts"].items()),
+        "",
+        "| Accepted candidate | Verification | Attempt seconds | Including failures | Preview |",
+        "| --- | --- | --- | --- | --- |",
     ]
-    for record in records:
-        links = []
-        for name, relative in record.get("visualization", {}).get("artifacts", {}).items():
-            if within(run_dir, relative).is_file():
-                links.append(f"[{name}]({relative})")
+    for record in accepted:
+        links = [
+            f"[{name}]({relative})"
+            for name, relative in record.get("visualization", {}).get("artifacts", {}).items()
+            if within(run_dir, relative).is_file()
+        ]
+        t = record.get("timing", {})
+        label = "legacy_unverified" if legacy else "clip_verified"
         lines.append(
-            f"| {html.escape(record['candidate_id'])} | {record['status']} | {record.get('export_status', 'pending')} | {' / '.join(links)} |"
+            f"| {record['candidate_id']} | {label} | {t.get('attempt_elapsed_seconds')} | "
+            f"{t.get('accepted_cost_seconds')} | {' / '.join(links)} |"
         )
-    if state.get("last_error"):
-        lines.extend(["", "Last error: " + html.escape(str(state["last_error"]))])
     path = run_dir / "report.md"
     atomic_bytes(path, ("\n".join(lines) + "\n").encode())
     return path

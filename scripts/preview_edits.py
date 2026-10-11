@@ -1,28 +1,36 @@
-"""Render sampled requested edits without invoking any generation or VQA model."""
+"""Rebuild accepted drag previews only; no generation, segmentation or CLIP inference."""
+
+from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
-from advv.config import load_config
-from advv.ingest import scan_sources, snapshot_sources
-from advv.sampler import sample_edit
+from advv.environment import require_advv
+from advv.errors import DataError
+from advv.reporting import accepted_records, report_run
+from advv.storage import atomic_json, read_json, run_lock
 from advv.visualization import render
+from advv.visualization_collection import build_collection
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--input-dir", type=Path, required=True)
-parser.add_argument("--output", type=Path, required=True)
-args = parser.parse_args()
-project = Path(__file__).resolve().parents[1]
-cfg = load_config(project / "configs/advv.example.yaml", input_dir=args.input_dir, target_count=1)
-args.output = args.output.resolve()
-args.output.mkdir(parents=True, exist_ok=False)
-sources = snapshot_sources(scan_sources(cfg)[0], args.output)
-for source in sources:
-    for index, operation in enumerate(["relocation", "deformation", "rotation"]):
-        cfg["sampler"]["operations"] = [operation]
-        plan = sample_edit(
-            source, {"summary": "Unverified source; geometry preview only."}, cfg, index, args.output
-        )
-        record = {"candidate_id": plan.edit_id, "plan": plan.to_dict(), "status": "planned", "checks": {}}
-        result = render(args.output, source.to_dict(), record, cfg["visualization"])
-        print(args.output / result["artifacts"]["drag_plan"])
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--run-dir", type=Path, required=True)
+    args = parser.parse_args()
+    require_advv()
+    root = args.run_dir.resolve()
+    with run_lock(root):
+        cfg = read_json(root / "config.json")
+        if cfg.get("schema_version") != "2.0":
+            raise DataError("Use the original renderer for legacy VQA runs")
+        sources = {s["source_id"]: s for s in read_json(root / "sources.json")}
+        build_collection(root)
+        for record in accepted_records(root):
+            record["visualization"] = render(root, sources[record["source_id"]], record, cfg["visualization"])
+            atomic_json(root / f"records/{record['candidate_id']}.json", record)
+            print(root / record["visualization"]["artifacts"]["comparison"])
+        report_run(root)
+
+
+if __name__ == "__main__":
+    main()

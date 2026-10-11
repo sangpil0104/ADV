@@ -1,0 +1,15 @@
+{
+  "version": "clip_contact_context_v1",
+  "criteria": {
+    "single": {
+      "uninvolved": "A photo of a vehicle driving normally on the road.",
+      "involved": "A photo of a vehicle involved in a traffic accident."
+    },
+    "contact_group": {
+      "uninvolved": "A dashcam photo of vehicles driving normally on a road.",
+      "involved": "A dashcam photo of vehicles involved in a traffic accident."
+    }
+  },
+  "rule": "both_views_involved_greater_than_uninvolved",
+  "claim": "uncalibrated_source_selection_proxy_not_ground_truth"
+}
