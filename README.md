@@ -2,7 +2,7 @@
 
 **DragFlow를 이용한 자율주행용 차량 사고 블랙박스 단일 프레임 이미지 증강**
 
-사고 관련 차량을 자동 선택해 전체 마스크를 합치고, 모든 선택 차량에 동일한 무작위 이동 벡터를 적용합니다. 편집 영역 크기는 전체 그룹 면적으로 고정됩니다. DragFlow 후보를 CLIP 문장 5쌍으로 평가해 **1–4번 중 3개 이상 통과하고 5번을 반드시 통과한** 새 이미지를 총 N장 모읍니다. N은 전체 입력의 총량입니다.
+사고 관련 차량을 자동 선택해 전체 마스크를 합치고, 모든 선택 차량에 동일한 무작위 이동 벡터를 적용합니다. 이동 크기는 사고 그룹 bbox 대각선 비율로 상한을 두고 세로 이동을 줄입니다(`accident_group_v2`). 편집 영역 크기는 전체 그룹 면적으로 고정됩니다. DragFlow 후보를 CLIP 문장 5쌍으로 평가해 **1–4번 중 3개 이상 통과하고 5번을 반드시 통과한** 새 이미지를 총 N장 모읍니다. N은 전체 입력의 총량입니다.
 
 ADVV 이름은 유지합니다. `Augmentation using DragFlow with VQA Verification`은 초기 방법의 풀네임이며 현재 검증기는 CLIP입니다.
 
@@ -17,12 +17,12 @@ ADVV 이름은 유지합니다. `Augmentation using DragFlow with VQA Verificati
 2026-10-11, **v0.4.1 / schema 2.0**: 전체 사고 차량 그룹 편집과 기존 GPU 쌍별 병렬 처리·공유 목표 수량을 구현했습니다.
 
 - 차량 instance segmentation: torchvision Mask R-CNN ResNet50-FPN COCO_V1, car/motorcycle/bus/truck.
-- 원본 접촉 관계와 로컬 CLIP의 객체/맥락 비교로 사고 관련 차량을 추정합니다. 선택된 차량 전체의 합집합 mask, 공통 이동 벡터, 원본/feature grid 경계 검사를 사용합니다. 차량 사이의 빈 공간과 떨어진 성분을 유지합니다.
+- 원본 접촉 관계와 로컬 CLIP의 객체/맥락 비교로 사고 관련 차량을 추정합니다. 선택된 차량 전체의 합집합 mask, 공통 이동 벡터, 원본/feature grid 경계 검사를 사용합니다. 이동 벡터는 크기 r(그룹 대각선의 `min_displacement_fraction`~`max_displacement_fraction`, 기본 0.03~0.3)과 방향 θ를 따로 뽑고 세로 성분에 `vertical_scale`(기본 0.5)을 곱합니다. 방향은 그 크기에서 그룹이 화면 안에 남는 각도 구간 안에서만 균등하게 뽑고, 상한 안에서 화면 안 이동이 하나도 없는 원본은 생성 전에 `no_valid_motion`으로 보류해 `state.json`·report에 표시합니다(전부 보류되면 `no_movable_sources`로 중단). 기본값은 GPU 스윕 전의 미검증 추정치입니다. 차량 사이의 빈 공간과 떨어진 성분을 유지합니다.
 - 로컬 CLIP ViT-L/14의 raw cosine 비교, 선택 `--prompt`, 총 N장 반복·중단·재개.
 - 채택 전용 시각화·export, 기존 비채택 상세 산출물 정리, 실패 포함 시간 기록.
 - GPU 두 개당 후보 작업 하나를 실행하고, 모든 작업이 총 N장을 공유합니다.
 - 모든 worker를 **conda ADVV의 동일한 Python**으로 실행합니다. 기존 venv는 사용하지 않습니다.
-- **CPU 테스트 148개·lint·v0.4.1 wheel 빌드 통과.** 전체 그룹·공식 좌표/affine 함수·기존 quota/재개/삭제 계약을 검증했습니다. `image1` 실제 CPU 분할+CLIP 선택 점검에서 두 사고 차량을 선택했습니다. 검증 수량·빌드 결과는 [검증 기록](docs/CLIP_BUILD_VERIFICATION.md)에 남깁니다.
+- **CPU 테스트 181개·lint 통과**(2026-10-11, 이동 크기 상한·가능 방향 표본·이동 불가 원본 보류 추가 후; GPU 숨김 상태에서 실행). v0.4.1 wheel 빌드는 상한 추가 전에 확인했습니다. 전체 그룹·공식 좌표/affine 함수·기존 quota/재개/삭제 계약을 검증했습니다. `image1` 실제 CPU 분할+CLIP 선택 점검에서 두 사고 차량을 선택했습니다. 검증 수량·빌드 결과는 [검증 기록](docs/CLIP_BUILD_VERIFICATION.md)에 남깁니다.
 
 **CPU 계약 검증과 실제 생성 이미지의 품질 평가는 구분합니다.** 저장된 실행에 CLIP 채택 결과가 있어도 전체 사고 차량의 정확한 선택·공동 이동이나 물리적 타당성을 보장하지 않습니다. 기존 6개 실행의 채택 이미지 51장에는 종류별 시각화와 생성 이미지·drag plan 모음을 적용했습니다. 이 시각화 갱신은 GPU 재추론 없이 수행했습니다. 상세 범위는 [현재 빌드 검증](docs/CLIP_BUILD_VERIFICATION.md), 과거 Qwen 결과는 [legacy 기록](docs/RUN_VERIFICATION.md)을 참고하세요.
 

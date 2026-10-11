@@ -1,5 +1,13 @@
 # CLIP 전환 빌드 검증
 
+## 2026-10-11: 이동 크기 상한(M002)과 QA 후속 수정(M002-fix), sampler `accident_group_v2`
+
+- M002: 공통 이동 벡터를 크기 r(그룹 bbox 대각선 비율 상·하한)과 방향 θ로 나눠 표본하고 세로 성분을 `vertical_scale`로 줄였다. conda `ADVV`, `CUDA_VISIBLE_DEVICES=''`에서 전체 CPU 테스트 **169개 통과**, lint 통과(implementer·QA 각각 실행).
+- M002-fix: θ를 해당 r의 가능 각도 구간 위 균등으로 표본, 이동 불가 원본 사전 보류(`no_valid_motion`/`no_movable_sources`), 표본 기록의 범위·run 설정 검사, footer 축약. 같은 조건에서 전체 CPU 테스트 **181개 통과**, ruff check 통과.
+- 1280×720 CPU 측정(기본값 0.3/0.03/0.5/uniform_radius, 실제 `sample_edit` 호출, 원본당 attempt 200개): 일반 두 차량·폭 80%·폭 80%+높이 80%·폭 90%(가장자리)·폭 95%·**폭 100%** 그룹 모두 attempt 실패 0/200(수정 전 QA: 폭 100%에서 38/40 실패). 폭 90%+높이 100%(세로 여유 0, r 가능 범위가 [하한, 약 64px]로 좁음)는 2/200이 `sampling_error`; 폭·높이 100%는 사전 판정에서 이동 불가로 보류 대상. 모든 표본의 θ가 다시 계산한 가능 구간 안, 결정론·JSON 왕복 후 `validate_plan` 통과. attempt당 CPU 약 0.16–0.21초.
+- 실현 분포(조건부 균등): 화면 여유가 충분하면 r은 설정 분포 그대로(정규화 r 평균 0.51, U[0,1] 대비 KS 0.055, n=200). 여유가 적으면 가능한 r만 남는다(폭·높이 80%: 정규화 r 평균 0.26). 폭 100% 그룹은 200개 모두 세로 이동이다. 방향 분포는 원 위 균등이 아니다.
+- GPU 추론, 모델 다운로드, wheel 재빌드는 하지 않았다. 상·하한·`vertical_scale` 초기값은 미검증이며 GPU 스윕이 남았다.
+
 ## 2026-10-11: GitHub 업데이트 전 검증
 
 - 최신 소스 전체를 conda `ADVV`, `CUDA_VISIBLE_DEVICES=''`에서 검사하여 **148개 테스트 통과**, lint 통과를 확인했다. 기존 matplotlib deprecation warning 14건은 실패가 아니다.

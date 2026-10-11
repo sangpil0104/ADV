@@ -13,7 +13,7 @@ from .config import gpu_groups, recipe_hash, validate_config
 from .contracts import EditRequest, Source
 from .errors import BackendError, DataError, FatalBackendError, ResponseError
 from .ingest import scan_sources, snapshot_sources
-from .sampler import candidate_id, sample_edit, validate_plan
+from .sampler import candidate_id, sample_edit, source_motion_feasible, validate_plan
 from .segmentation import validate_segments
 from .storage import (
     atomic_bytes,
@@ -205,9 +205,25 @@ class Pipeline:
                     raise DataError("Accident selection cache identity changed")
             self.segment_cache[source.source_id] = result
             self.clock.checkpoint()
-        self.eligible = [s for s in self.sources if self.segment_cache.get(s.source_id, {}).get("accident_group")]
+        self.eligible = [
+            s for s in self.sources if self.segment_cache.get(s.source_id, {}).get("accident_group")
+        ]
         if not self.eligible:
             raise DataError("no_eligible_sources")
+        # Deterministic pre-check; a held source stays held for the whole run.
+        held = dict(self.state.get("held_sources", {}))
+        for source in self.eligible:
+            sid = source.source_id
+            if sid not in held and not source_motion_feasible(
+                source, self.segment_cache[sid], self.cfg, self.root
+            ):
+                held[sid] = "no_valid_motion"
+                LOG.warning("Holding source %s: no capped in-frame group translation exists", sid)
+        self.state["held_sources"] = held
+        self.save_state()
+        self.eligible = [s for s in self.eligible if s.source_id not in held]
+        if not self.eligible:
+            raise DataError("no_movable_sources")
 
     def _recover(self):
         recover_cleanup(self.root)
@@ -234,7 +250,9 @@ class Pipeline:
                 raise DataError("Accepted plan changed")
             if digest(record["effective"]) != record["effective_sha256"]:
                 raise DataError("Accepted effective geometry changed")
-            validate_plan(EditRequest(**record["plan"]), self.by_id[record["source_id"]], self.root)
+            validate_plan(
+                EditRequest(**record["plan"]), self.by_id[record["source_id"]], self.root, self.cfg["sampler"]
+            )
             self.seen.add(record["pixel_sha256"])
             # Repairs only artifacts, never invokes the generator or CLIP.
             self._finish_presentation(record)
@@ -375,7 +393,7 @@ class Pipeline:
         plan = EditRequest(**record["plan"])
         if digest(record["plan"]) != record["plan_sha256"]:
             raise DataError("Private plan changed")
-        validate_plan(plan, source, self.root)
+        validate_plan(plan, source, self.root, self.cfg["sampler"])
         if record["status"] == "planned":
             result = self._retry(record, "generation", lambda: backend.generate(source, plan, self.root))
             expected = within(self.root, f".staging/{plan.edit_id}/backend/generated.png")
@@ -565,7 +583,8 @@ class Pipeline:
             except Exception as exc:
                 code = (
                     str(exc)
-                    if str(exc) in ("no_eligible_sources", "consecutive_technical_failures")
+                    if str(exc)
+                    in ("no_eligible_sources", "no_movable_sources", "consecutive_technical_failures")
                     else type(exc).__name__
                 )
                 self.state["last_error"] = {"code": code}

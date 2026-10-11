@@ -118,9 +118,11 @@ def report_run(run_dir: Path, *, final_status=None) -> Path:
             s["source_id"]: {
                 "attempts": sum(e["source_id"] == s["source_id"] for e in entries),
                 "accepted": sum(r["source_id"] == s["source_id"] for r in accepted) if not legacy else 0,
+                "held": state.get("held_sources", {}).get(s["source_id"]),
             }
             for s in sources
         },
+        "held_sources": state.get("held_sources", {}),
         "last_error": {
             "code": state["last_error"].get("code", state["last_error"].get("type", "legacy_error"))
         }
@@ -157,6 +159,7 @@ def report_run(run_dir: Path, *, final_status=None) -> Path:
         "",
         f"CLIP accepted: **{count}/{result['target']}** | Attempts: {len(entries)}",
         f"Outcome counts: {counts}",
+        f"Held sources (not attempted): {result['held_sources'] or 'none'}",
         "",
         f"Active seconds: {total} | Pending seconds: {result['pending_cost_seconds']}",
         f"Active seconds / accepted: {result['mean_active_seconds_per_accepted']}",

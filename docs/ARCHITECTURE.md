@@ -10,7 +10,7 @@
 | `prepare.py`, `preflight.py` | Qwen/venv 필수 조건 제거, 단일 conda·CLIP·segmenter·로컬 가중치 검사 |
 | `contracts.py`, `ingest.py` | Source 계보 유지; Segment/EditRequest/CLIPResult/TimingRecord 계약 추가 |
 | `segmentation.py`, `accident_group.py` | 전체 instance mask 검증, 접촉 관계별 CLIP source 선택, 전체 합집합/선택 provenance |
-| `sampler.py`, `group_geometry.py` | 전체 그룹 면적 고정, 원본/feature grid 안의 공통 비항등 이동 |
+| `sampler.py`, `group_geometry.py` | 전체 그룹 면적 고정, 원본/feature grid 안의 공통 비항등 이동; `accident_group_v2`는 크기 r(그룹 bbox 대각선 비율 상·하한)·방향 θ 분리 표본 + 세로 축소. θ는 그 r에서 화면·grid 조건을 만족하는 각도 구간 위 균등; 이동 가능한 Δ가 없는 원본은 생성 전에 판정해 보류 |
 | `backends/dragflow.py`, `backends/group_adapter.py` | contour loader 우회, 단일 full-union region, 공통 grid Δ hook, 별도 repair support |
 | `motion.py` | CPU 차량별 appearance matching 이동 진단; 채택 조건 추가 없음 |
 | `backends/clip.py` | 10문장 embedding, 전체 프레임 입력, raw cosine 10개 반환 |
@@ -33,6 +33,7 @@ ADVV conda coordinator
   → 설정/입력/동일 환경 검사
   → 관리하는 종료 run의 비채택 산출물 정리 (추론 전)
   → 원본 ingest + segmenter worker → CLIP 사고 관계 선택 → 전체 그룹 cache + selection preview
+  → 원본별 이동 가능성 사전 판정: 불가 원본은 state.held_sources(no_valid_motion)로 보류, 전부 보류 시 no_movable_sources
   → GPU 목록을 2개씩 분할: [4,5], [6,7]
   → while unique durable accepted < N:
       coordinator: 채택 수 + 예약 수 <= N 범위에서 원본/attempt/sequence 예약

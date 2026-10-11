@@ -89,6 +89,39 @@ def _status(record, name):
     )
 
 
+def _short(value):
+    if isinstance(value, float):
+        return f"{value:.4g}"
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_short(v) for v in value) + "]"
+    if isinstance(value, dict):
+        return "{" + ", ".join(f"{k}={_short(v)}" for k, v in value.items()) + "}"
+    return str(value)
+
+
+def params_summary(params: dict) -> str:
+    """Short footer text; full-precision values stay in the plan/metadata JSON."""
+    known = {"displacement_pixels", "group_grid_geometry", "displacement_sampling"}
+    parts = []
+    if "displacement_pixels" in params:
+        parts.append(f"shift={_short(params['displacement_pixels'])} px")
+    if isinstance(params.get("group_grid_geometry"), dict) and "grid_delta" in params["group_grid_geometry"]:
+        parts.append(f"grid shift={_short(params['group_grid_geometry']['grid_delta'])}")
+    s = params.get("displacement_sampling")
+    if isinstance(s, dict):
+        try:
+            parts.append(
+                f"r={s['radius_pixels']:.1f} px theta={math.degrees(s['angle_radians']):.1f} deg "
+                f"| cap {s['min_radius_pixels']:.1f}-{s['max_radius_pixels']:.1f} px "
+                f"({s['min_displacement_fraction']:.4g}-{s['max_displacement_fraction']:.4g} x D={s['group_bbox_diagonal_pixels']:.0f}) "
+                f"| vertical_scale={s['vertical_scale']:.4g} {s['magnitude_distribution']}"
+            )
+        except (KeyError, TypeError, ValueError):
+            parts.append(f"sampling={_short(s)}")
+    parts.extend(f"{k}={_short(v)}" for k, v in params.items() if k not in known)
+    return " | ".join(parts)
+
+
 def render_plan_panel(run_dir, original, plan, geometry, settings, *, show_labels=True):
     """Render only the photograph and drag geometry; no heading or footer."""
     w, h = original.size
@@ -255,7 +288,7 @@ def render(run_dir: Path, source: dict, record: dict, settings: dict) -> dict:
             f"Requested S={point(plan['source_point'])} E={point(plan['target_point'])}; backend grid/rounding recorded"
         )
     if plan["operation_params"]:
-        lines.append(str(plan["operation_params"]))
+        lines.append(params_summary(plan["operation_params"]))
     font = _font()
     artifacts = {}
 

@@ -48,9 +48,11 @@ conda 환경 이름은 `ADVV`다(`environments/advv-conda.yml`). 아직 없으�
 
 ```bash
 cd /data2/donginson/projects/ADVV
-conda run -n ADVV python -m pytest -q
+CUDA_VISIBLE_DEVICES="" conda run -n ADVV python -m pytest -q
 conda run -n ADVV python -m ruff check src scripts tests
 ```
+
+pytest는 반드시 `CUDA_VISIBLE_DEVICES=""`로 돌린다. upstream DragFlow import가 CUDA context를 만들 수 있어서, GPU를 숨기지 않으면 소유자 확인 없이 기본 GPU(0번, 다른 사용자 GPU일 수 있음)에 context가 생긴다.
 
 `conda run`은 heredoc stdin을 전달하지 않는다. 스크립트를 stdin으로 넣을 때는 `ADVV` 환경의 python 실행 파일 경로를 직접 쓴다.
 

@@ -1,5 +1,14 @@
 # CLIP 전환 구현 계획
 
+## 2026-10-11: 공통 이동 벡터 크기 상한 (M002, sampler `accident_group_v2`)
+
+- [x] `sampler.py`: x·y 독립 균등(화면 안 어디든) 대신 r ∈ [min, max]×그룹 bbox 대각선, θ ∈ [0, 2π), Δ=(round(r cosθ), round(vertical_scale·r sinθ)). 정수화 후 상한 초과·화면/grid 이탈·grid 항등은 재표본, `geometry_attempts` 소진 시 기존 `DataError`.
+- [x] `operation_params.displacement_sampling` 기록과 `validate_plan`의 재계산 검증. `config.py` 범위 검증, 예시 설정 키 추가.
+- [x] CPU 테스트 21개 추가(상·하한, 세로 축소, 결정론, 큰/작은/가장자리 그룹, 유효 이동 없음, 기록 변조, 설정 오류). [SPEC 5.3](../SPEC.md#53-공동-이동).
+- [x] M002-fix(QA 후속): θ를 그 r에서 화면·grid 조건을 만족하는 각도 구간 합집합 위 균등으로 뽑고(없으면 r 재표본), 생성 전 원본별 이동 가능성을 정수 Δ 격자로 결정적으로 판정해 불가 원본을 `held_sources: no_valid_motion`으로 보류(전부 보류 시 `no_movable_sources`). `validate_plan`이 비율 범위·run 설정 일치·θ ∈ Θ(r)를 검사. drag plan footer의 sampling 표시 축약.
+- [x] 검증(2026-10-11, conda `ADVV`, `CUDA_VISIBLE_DEVICES=''`): 전체 CPU 테스트 **181개 통과**(M002 169 + fix 12), ruff 통과. 1280×720 CPU 측정에서 폭 100% 그룹 attempt 실패 0/200(수정 전 QA 38/40). 자세한 수치는 [빌드 검증](CLIP_BUILD_VERIFICATION.md). GPU 추론·wheel 재빌드 없음.
+- [ ] GPU 스윕: `max_displacement_fraction` ∈ {0.1, 0.2, 0.3, 0.5}로 같은 원본·seed에서 후보를 생성해 CLIP 통과율·육안 품질 비교 후 기본값 확정. 현재 초기값(0.3/0.03/0.5)은 미검증.
+
 ## 2026-10-11: 종류별 시각화 저장
 
 - [x] comparison/drag_plan/metadata 폴더별 개별 파일 저장과 생성 이미지 전체 grid 자동 갱신.

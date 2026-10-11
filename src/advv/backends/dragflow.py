@@ -110,7 +110,7 @@ class DragFlow:
     def __call__(self, request):
         torch, root = self.torch, self.run_dir
         source, plan = Source(**request["source"]), EditRequest(**request["plan"])
-        validate_plan(plan, source, root)
+        validate_plan(plan, source, root, self.cfg["sampler"])
         seed = plan.seed
         random.seed(seed)
         np.random.seed(seed)

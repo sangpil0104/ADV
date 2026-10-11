@@ -12,3 +12,4 @@
 | 2026-09-30 | 초기 구성: researcher/implementer/qa/gpu-runner + orchestrator/rules/gpu-safety 스킬 | 전체 | 연속 질문 처리를 위한 하위 에이전트 분업 |
 | 2026-10-06 | advv-rules·orchestrator를 CLIP 필터 판정으로 갱신 | skills | 판정 방식 교체(T026) |
 | 2026-10-11 | main(e01f987) 위로 이전: 규칙을 사고 그룹 이동·CLIP 5쌍·conda ADVV 기준으로 갱신 | skills, agents, .gitignore | 원작성자 main 갱신 반영 |
+| 2026-10-11 | pytest 명령에 CUDA_VISIBLE_DEVICES="" 강제 | skills/advv-rules | M002 테스트 중 기본 GPU에 CUDA context 생성 |

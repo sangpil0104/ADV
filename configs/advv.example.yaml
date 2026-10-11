@@ -27,10 +27,19 @@ generation:
     vehicles.
   augmentation_prompt: null
 sampler:
-  version: accident_group_v1
+  version: accident_group_v2
   operations:
   - relocation
   geometry_attempts: 64
+  # Common group displacement: radius r in [min, max] x (accident group mask bbox diagonal),
+  # angle uniform over the directions that keep the group in frame/grid at that r (r is
+  # redrawn if none), delta = round(r cos, vertical_scale * r sin). Sources with no valid
+  # move are held before generation. Initial values are UNVERIFIED conservative guesses;
+  # decide them with the GPU sweep (SPEC 5.3).
+  max_displacement_fraction: 0.3
+  min_displacement_fraction: 0.03
+  vertical_scale: 0.5
+  magnitude_distribution: uniform_radius
 segmentation:
   backend: torchvision_maskrcnn_resnet50_fpn
   weights_id: COCO_V1

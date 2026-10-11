@@ -157,7 +157,10 @@ def validate_config(cfg: dict) -> None:
             e["selected_gpu_ids"] = parse_gpus(e["selected_gpu_ids"])
             gpu_groups(e["selected_gpu_ids"])
         s = cfg["sampler"]
-        require(s["version"] == "accident_group_v1", "Whole accident group sampler required; start a new run")
+        require(
+            s["version"] == "accident_group_v2",
+            "Capped whole accident group sampler accident_group_v2 required; start a new run",
+        )
         require(
             s["operations"] == ["relocation"],
             "v2 baseline supports relocation; other mappings need validation",
@@ -165,6 +168,24 @@ def validate_config(cfg: dict) -> None:
         require(
             type(s["geometry_attempts"]) is int and 1 <= s["geometry_attempts"] <= 512,
             "Invalid geometry attempts",
+        )
+        low, high, scale = (
+            s["min_displacement_fraction"],
+            s["max_displacement_fraction"],
+            s["vertical_scale"],
+        )
+        require(
+            all(type(v) in (int, float) and math.isfinite(v) for v in (low, high, scale)),
+            "Displacement fractions and vertical_scale must be finite numbers",
+        )
+        require(
+            0 <= low < high <= 1,
+            "Require 0 <= min_displacement_fraction < max_displacement_fraction <= 1 (group bbox diagonal)",
+        )
+        require(0 < scale <= 1, "vertical_scale must be in (0, 1]")
+        require(
+            s["magnitude_distribution"] in ("uniform_radius", "uniform_area"),
+            "magnitude_distribution must be uniform_radius or uniform_area",
         )
         require(
             not {"region_area_fraction", "expansion_pixels"} & s.keys(),

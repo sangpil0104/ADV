@@ -29,6 +29,8 @@ upstream resize·feature-grid 반올림·시작점 centroid 교체를 기록한�
 
 생성 전에 `segments/<source_id>/selection.png`를 저장한다. 초록 mask는 선택, 빨강은 제외된 차량 후보이며 ID를 표시한다. 이 원본 진단은 후보별 탈락 이미지와 구분해 보존한다. 선택이 불확실하거나 차량이 빠졌다면 일반화 성공으로 보고하지 않는다.
 
+`accident_group_v2` 계획의 metadata `operation_params.displacement_sampling`에는 표본 r·θ, 그룹 bbox 대각선, 실제 상·하한 픽셀 값, `vertical_scale`, 분포, 가능 방향 크기(`feasible_angle_radians`)가 전체 정밀도로 남는다. drag plan footer에는 이를 줄인 한 줄(`shift=[dx, dy] px | grid shift | r=… px theta=… deg | cap 하한-상한 px (비율 x D) | vertical_scale 분포`, 유효숫자 제한)만 표시한다. 이 값은 계획의 표본 기록이며 실제 이동 측정값이 아니다.
+
 채택 metadata와 footer에는 차량별 외형 template 매칭 이동 추정·잔차를 표시한다. 매칭 불가능하면 `unmeasurable`이며, 이 진단은 실제 사고 차량 동일성·이동 성공의 자동 인증이 아니다.
 
 ## 3. CLIP와 시간 표시
