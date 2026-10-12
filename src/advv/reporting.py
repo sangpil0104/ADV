@@ -55,6 +55,7 @@ def export_run(run_dir: Path) -> Path:
                 "source_id": r["source_id"],
                 "image_path": r["image_path"],
                 "source_image_path": source["image_path"],
+                "source_preprocessing": source.get("preprocessing"),
                 "split": source["split"],
                 "group_id": source["group_id"],
                 "domain": source["domain"],

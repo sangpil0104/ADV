@@ -1,6 +1,6 @@
 # ADVV 구현 명세
 
-- 문서 버전: **0.12**, 갱신일: **2026-10-11** (0.11: 공통 이동 벡터 크기 상한, sampler `accident_group_v2`; 0.12: 가능 방향 조건부 θ, 이동 불가 원본 사전 보류)
+- 문서 버전: **0.13**, 갱신일: **2026-10-12** (0.11: 공통 이동 벡터 크기 상한, sampler `accident_group_v2`; 0.12: 가능 방향 조건부 θ, 이동 불가 원본 사전 보류; 0.13: 입력 긴 변 축소 snapshot, 사고 차량 선택 `clip_contact_context_v2` 결정적 규칙, 이동 상한 기본 0.15)
 - 실행 schema: **2.0** — 기존 VQA schema 1.1 run과 재개 호환되지 않음
 - 상태: **v0.4.0에 전체 사고 차량 선택·공동 이동 입력·시각화·진단을 구현했다.** CPU 계약과 실제 image1의 CPU 선택은 확인했으며, 새 경로의 GPU 생성 품질은 미검증이다.
 - 프로젝트 이름 ADVV 유지. 기존 풀네임의 VQA는 초기 방법을 가리킨다.
@@ -98,6 +98,12 @@ pass_i = margin_i > 0                  # 동점은 실패, 초기 threshold=0
 
 폴더는 안정된 순서로 읽고 EXIF 방향 정규화·RGB 변환·픽셀 hash를 적용한다. 다중 프레임 파일은 단일 프레임 이미지로 자동 간주하지 않는다. 원본은 읽기 전용으로 유지하고 새로운 run의 snapshot을 만든다.
 
+**입력 축소 (2026-10-12 사용자 결정).** snapshot 단계에서 긴 변이 `dataset.max_long_side_px`(기본 **960**)를 넘으면 종횡비를 유지해 긴 변을 그 값으로 줄인다(`round(변 × 960/긴 변)`, Pillow `dataset.downscale_resample`, 기본 `lanczos`; `bicubic`/`box` 선택 가능, `reducing_gap` 없음). 이미 작은 이미지는 확대하지 않는다. `null`이면 원본 해상도를 그대로 쓴다. 축소 후 짧은 변이 32px 미만이면 오류다.
+- 원본 파일은 바꾸지 않는다. run의 `inputs/images/<source_id>.png`만 축소 사본이다. 이후 분할·사고 차량 선택·sampler·DragFlow·CLIP·시각화가 모두 이 snapshot 해상도와 좌표계를 쓰므로 **채택 이미지도 축소 해상도**다. 원본 해상도로 되돌리는 업스케일은 하지 않는다.
+- `sources.json`의 `width/height/pixel_sha256`은 snapshot 기준이고, `file_sha256`은 원본 파일 hash다. `preprocessing`에 정책 이름(`downscale_long_side_v1`), 설정값, 보간 방식, Pillow 버전, `resized`, `original_size`, `snapshot_size`, 실제 축 비율 `scale`, `original_pixel_sha256`을 남긴다. 같은 내용을 후보 record(`source_preprocessing`), 채택 시각화 metadata, export 행에도 복사한다.
+- 두 설정 키는 recipe에 포함된다. 값을 바꾸면 새 run이다.
+- 이유: M008에서 1920×1080 입력의 DragFlow 생성이 후보당 1800초 timeout을 넘었다(960×720은 15–27분). 축소 효과의 GPU 실측은 아직 없다.
+
 `run/preflight --image image1.png`를 선택적으로 지원한다. `dataset.input_dir` 기준 상대 파일 경로(확장자 포함)이며 CLI > YAML `dataset.image` > 전체 폴더 순서다. 선택 시 해당 이미지 하나만 decode·snapshot·segmentation·증강 대상으로 사용하고 다른 파일은 읽지 않는다. 선택은 recipe에 고정하며 재개에 새 `--image`를 주면 거부한다. 파일 누락/미지원 형식/디렉터리/외부 경로·symlink 탈출은 기존 run 정리나 모델 preflight 전에 오류로 처리하며 전체 폴더로 대체하지 않는다. manifest 입력과 파일 선택을 혼용하여 split/label 계약을 우회하지 않는다.
 
 | 계약 | 목표 동작 |
@@ -124,11 +130,19 @@ Source는 `source_id`, 입력 경로·hash, 정규화 크기, `group_id`, `split
 1. 원본에서 차량별 instance mask를 얻는다. 검출 차량과 사고 관련 차량은 같은 집합이 아니다.
 2. 사고 관련 차량 선택 단계에서 사고에 직접 관여한 차량 ID를 **전부** 선택한다. 추돌·측면 충돌·연쇄 사고·단독 전복/충돌 등 사고 형태를 추돌로 한정하지 않는다. 일반 통행/주차 차량, 구경하는 사람, 도로와 건물은 포함하지 않는다. 파편도 이번 이동 대상에 포함하지 않는다.
 3. 자동 선택을 기본 목표로 유지한다. 단순히 모든 차량을 합치거나 가장 큰 차량·가까운 차량을 골랐다는 이유만으로 사고 차량을 찾았다고 표시하지 않는다. 기존 Mask R-CNN은 vehicle instance mask 후보를 주는 모듈이고 사고 관련성 판별기는 아니다.
-4. `clip_contact_context_v1`을 source selector baseline으로 사용한다. 고정 Mask R-CNN의 차량 전체 mask에 겹침/8방향 접촉 그래프를 만들고 연결된 차량을 관계 평가 단위로 묶는다. 최대 면적/최단 거리 선택은 하지 않는다. 단독 차량은 별도 단위로 남긴다. 각 단위의 전체 mask cutout(나머지 회색)과 bbox 각 변에 크기의 25%를 더한 주변 맥락 crop을 만든다. 두 view 모두 사고 caption cosine > 정상 caption cosine일 때 구성 차량들을 선택한다. 단독/접촉 그룹용 영어 2쌍은 `prompts/accident_vehicles_v1.json`에 고정하고, scorer는 후보 verifier와 같은 로컬 CLIP revision/letterbox를 사용한다. contact 그룹의 dilation은 인접성 조회에만 쓰며 객체 mask를 늘리지 않는다.
+4. `clip_contact_context_v1`을 source selector baseline으로 사용한다(아래 v2가 기본, v1은 비교용으로 남긴다). 고정 Mask R-CNN의 차량 전체 mask에 겹침/8방향 접촉 그래프를 만들고 연결된 차량을 관계 평가 단위로 묶는다. 최대 면적/최단 거리 선택은 하지 않는다. 단독 차량은 별도 단위로 남긴다. 각 단위의 전체 mask cutout(나머지 회색)과 bbox 각 변에 크기의 25%를 더한 주변 맥락 crop을 만든다. 두 view 모두 사고 caption cosine > 정상 caption cosine일 때 구성 차량들을 선택한다. 단독/접촉 그룹용 영어 2쌍은 `prompts/accident_vehicles_v1.json`에 고정하고, scorer는 후보 verifier와 같은 로컬 CLIP revision/letterbox를 사용한다. contact 그룹의 dilation은 인접성 조회에만 쓰며 객체 mask를 늘리지 않는다.
    - 선택 결과·관계 단위·view별 점수·구성 ID·각 mask/hash·그룹 mask/hash·설정/문장/model revision hash를 원본별 cache에 기록한다.
    - 0점 차이는 선택 실패, 비유한/누락 점수는 기술 오류다. 양쪽 view를 통과한 단위가 없으면 해당 원본은 후보 생성 대상에서 제외한다. 모든 차량을 합치는 fallback은 없다.
    - **검증되지 않은 자동 추정 baseline**이다. 투영상 접촉은 실제 접촉이 아닐 수 있고, 떨어진 사고 차량이나 멀리 있는 차량을 놓칠 수 있다. 분할 누락·가림·연쇄 오류도 가능하다. image1을 포함한 개발 이미지의 선택 성공은 일반화 검증이 아니다. 원본 preview와 별도 수동 검수로 완전성을 평가해야 한다.
    - source selector용 crop/4문장은 후보 채택용 전체 프레임/고정 10문장과 분리한다. `--prompt`로 선택 기준을 바꾸지 않는다.
+6. **`clip_contact_context_v2` (기본, 2026-10-12).** v1의 CLIP 판정(문장 2쌍·두 view·margin > 0)은 그대로 두고, 그 앞뒤에 결정적 규칙을 더한다. 문장 파일은 `prompts/accident_vehicles_v2.json`(문장은 v1과 같음), 임계값은 `accident_selection.rules`에 둔다. 임계값은 M007/M008 개발 이미지 10장의 실측 사례로 정한 **미검증 값**이다.
+   1. **자기 차 보닛 제외**: mask bbox 아래 끝이 화면 아래 경계에서 `ego_bottom_margin_fraction`(0.05)×높이 안이고, bbox 폭 ≥ `ego_min_width_fraction`(0.6)×폭, 면적 ≥ `ego_min_area_fraction`(0.1)×화면이면 `ego_vehicle_hood`로 제외한다. 접촉 그래프에도 넣지 않는다(다른 차량을 잇는 다리 역할 방지). 실측: 04의 0006은 아래 경계까지 19px(1.8%), 폭 94%, 면적 29%.
+   2. **같은 차 중복 병합**: IoU ≥ `duplicate_min_iou`(0.5)인 검출은 한 차량으로 묶는다. 대표는 confidence가 가장 높은 mask이고 나머지는 `duplicate_of`로 기록한다. 픽셀을 버리지 않도록 차량 mask는 합집합이며 선택 여부도 함께 따른다. 차량 1대는 단독 caption을 쓴다. 실측: 중복 IoU 0.54–0.97, 서로 다른 접촉 차량의 최대 IoU 0.27.
+   3. **얇은 틈 접촉**: 두 차량 mask 사이 거리가 `contact_gap_fraction`(0.015)×작은 차량 bbox 대각선 이하이면(최소 8방향 접촉) 접촉으로 본다. mask는 늘리지 않는다. 실측: 01의 흰 해치백-초록 SUV 틈 4px(작은 대각선의 0.0085); 접촉하지 않는 다른 쌍은 모두 0.025 이상.
+   4. **먼 차 분리(원근 겹침)**: 접촉 단위 안에서 가장 큰 차량(anchor)보다 면적이 `distant_max_area_ratio`(0.1)배 미만이고, bbox 아래 끝이 anchor보다 `distant_min_bottom_gap_fraction`(0.25)×anchor bbox 높이를 넘게 위에 있는(=더 멀리 있는) 차량은 `distant_perspective_overlap`으로 CLIP 없이 제외하고, 남은 차량으로 접촉 단위를 다시 계산한다. 같은 깊이의 작은 차량(오토바이 등)은 아래 끝이 가까우므로 남는다. 기록에 anchor ID, 면적 비, 아래 끝 차이, 자기 면적 중 anchor와 겹친 비율을 남긴다. 실측: accident_car_tree의 0002는 면적 비 0.011, 아래 끝 차이 324px(anchor 높이의 0.81)이며, 자기 면적의 88%가 사고 차 0007 mask 안에 있다. 실제 접촉이 아니라 큰 mask가 먼 차 위까지 번진 원근 겹침이다.
+   5. **떨어진 작은 먼 단위 제외**: CLIP을 통과한 단위가 여럿이면 선택 차량 중 가장 큰 차량을 핵심으로 보고, 핵심을 포함하지 않은 단위의 모든 차량이 위 4번 조건으로 먼 차이면 그 단위를 `distant_separate_unit`으로 제외한다(`clip_passed`는 기록에 남김). 저해상도에서 먼 차량 행렬이 CLIP을 통과하는 사례(01·02, 960px 모의)를 막는다.
+   - 결과에 `method`, `rules`, 차량별 `excluded_reason`(`ego_vehicle_hood`·`distant_perspective_overlap`·`distant_separate_unit`·`clip_not_involved`)·`duplicate_of`, 단위별 `vehicles`, `limitations`를 기록하고 `selection.png`에 방법·한계·제외 이유를 표시한다. 계약은 그대로다: 사고 관련 차량만 전부 선택, 무관 차량 합치기 fallback 없음, 선택 0대면 그 원본 보류.
+   - 규칙으로 해결하지 못하는 한계: Mask R-CNN이 차량을 검출하지 못하거나 일부만 검출하면 선택할 수 없다(06의 옆으로 누운 차량은 끝부분 0007만 검출되고 CLIP도 비관여로 판정). 보닛을 제거하면 CLIP 판정이 바뀔 수 있다(04의 실제 충돌 두 대는 보닛 없이 foreground margin −0.004로 통과하지 못해 0대가 되었다). 저장된 10장 결과에 새 규칙을 다시 적용한 표는 [빌드 검증](docs/CLIP_BUILD_VERIFICATION.md)에 있다.
 5. 신뢰할 그룹이 없으면 해당 원본을 보류하고 원인을 기록한다. 다른 차량을 임의로 대신 선택하지 않는다. 차량 1대의 단독 사고도 유효한 그룹이다.
 
 ### 5.2 전체 마스크와 범위
@@ -172,7 +186,7 @@ r ~ [min_displacement_fraction·D, max_displacement_fraction·D]   (magnitude_di
 - 상한·세로 축소·r 하한·정수화 후 상한 검사는 그대로다. 정수화 결과는 마지막에 다시 검사하며, 실패한 draw(Θ(r)=∅ 포함)는 `geometry_attempts` 예산 안에서 다시 뽑는다. 결정론: 같은 rng에서 r, (Θ(r)가 비지 않을 때만) θ 순서로 draw.
 - **이동 불가 원본 사전 보류.** 생성 전에 원본별로 상한·하한·화면·feature grid·grid 비항등 조건을 함께 만족하는 이동이 하나라도 있는지 결정적으로 판정한다: 상한·화면 범위 안의 모든 정수 Δ를 조사해, 유효한 Δ 중 반올림 셀 `[dx±0.5]×[dy±0.5]`의 r 범위(r = √(x² + (y/vertical_scale)²))가 열린 구간 (하한, 상한)과 겹치는 것이 있는지 본다. 그룹·선택 차량이 DragFlow feature 해상도에서 사라지는 경우도 이동 불가다. 없으면 원본을 `held_sources[<source_id>] = "no_valid_motion"`으로 `state.json`에 기록하고 report(`held_sources`, `per_source.held`)에 표시하며 그 run에서 다시 시도하지 않는다(재개 시에도 기록된 보류를 유지). 모든 사고 그룹 원본이 보류되면 `no_movable_sources`로 run을 멈춘다(`no_eligible_sources`와 같은 방식의 명확한 종료 코드).
 - 이동이 가능한 원본이라도 한 attempt가 `geometry_attempts`를 모두 소진할 수 있다(가능한 r 범위가 매우 좁은 경우). 이때 부분 mask나 상한 완화 없이 그 attempt를 `error`/`sampling_error`로 기록하고, 원본 순환에 따라 같은 원본의 다음 attempt에서 새 seed로 다시 표본한다. 원본 단위 보류는 위 사전 판정에서만 일어난다.
-- 초기값 `max=0.3`, `min=0.03`, `vertical_scale=0.5`, `uniform_radius`는 **미검증 보수적 추정이며 GPU 실측 스윕으로 결정한다.** 0.3D는 이동 전후 그룹 footprint가 크게 겹쳐 DragFlow가 새로 칠할 빈자리를 줄이려는 선택이다.
+- 초기값 `max=0.15`(2026-10-12에 0.3에서 낮춤: M007의 0.3 채택 2장이 육안상 실패), `min=0.03`, `vertical_scale=0.5`, `uniform_radius`는 **미검증 보수적 추정이며 GPU 실측 스윕으로 결정한다.** 작은 상한은 이동 전후 그룹 footprint가 크게 겹쳐 DragFlow가 새로 칠할 빈자리를 줄이려는 선택이다.
 - 계획 `operation_params.displacement_sampling`에 r, θ, 실제 상한/하한 픽셀 값, 비율, D, `vertical_scale`, 분포, |Δ|, `feasible_angle_radians`를 기록한다. `validate_plan`은 마스크에서 D와 Θ(r)를 다시 계산해 일치·θ ∈ Θ(r)를 확인하고, 비율 범위(`0 ≤ min < max ≤ 1`, `0 < vertical_scale ≤ 1`, 분포 이름)와 run 설정의 sampler 값(비율·`vertical_scale`·분포)과의 일치를 검사한다. 결정론은 기존과 같다: `(run.seed, source_id, source pixel hash, attempt_index)` → `np.random.default_rng`.
 - v1 설정/계획은 v2 코드에서 거부되며, 코드·recipe가 바뀌므로 기존 run은 재개할 수 없다. 새 run으로 실행한다.
 
@@ -311,7 +325,9 @@ conda ADVV에 torch 2.5.1, torchvision 0.20.1, Transformers 4.48.0, Diffusers 0.
 - 실제 사고 프레임에서 차량 segmentation 검출률과 자유형 면적 분포의 적합성.
 - 고정 upstream의 GPU 생성에서 실제 시작점·영역·좌표 및 편집 품질.
 - CLIP의 물리/사고 오수락·오배제와 전체 처리량·GPU 메모리.
-- 이동 크기 상한 `max_displacement_fraction` ∈ {0.1, 0.2, 0.3, 0.5}(하한·세로 계수 고정) 스윕의 CLIP 통과율·육안 품질 비교로 초기값 확정.
+- 이동 크기 상한 `max_displacement_fraction` ∈ {0.1, 0.15, 0.2, 0.3}(하한·세로 계수 고정, 960px snapshot) 스윕의 CLIP 통과율·육안 품질 비교로 초기값 확정.
+- 960px 축소 입력의 DragFlow 생성 시간·VRAM, 1920×1080 timeout 해소 여부.
+- `clip_contact_context_v2` 선택의 GPU 재분할(960px) 결과와 사람 검수.
 - 실제 GPU 두 묶음의 동시 생성·VRAM·공유 quota 종료 및 중단·재개; 과거 결과 정리는 임시 fixture에서 확인했고 실제 사용은 다음 run부터 수행한다.
 
 위 항목은 CPU 계약 검사로 대신할 수 없는 실험이다. 현재 확인한 범위는 [빌드 검증](docs/CLIP_BUILD_VERIFICATION.md), 구현 상태와 완료 기준은 [IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md)에 정의한다.

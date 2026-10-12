@@ -54,7 +54,7 @@ def create_run(cfg: dict, run_id: str, *, provenance: str, initial_seconds=0.0) 
     run_dir = root / run_id
     run_dir.mkdir(exist_ok=False)
     atomic_json(run_dir / "config.json", copy.deepcopy(cfg))
-    sources = snapshot_sources(sources, run_dir)
+    sources = snapshot_sources(sources, run_dir, cfg["dataset"])
     atomic_json(run_dir / "sources.json", [s.to_dict() for s in sources])
     atomic_json(
         run_dir / "manifest.json",
@@ -465,6 +465,7 @@ class Pipeline:
             "attempt_index": attempt,
             "sequence": max([r["sequence"] for r in entries] or [-1]) + 1,
             "backend": self.backend.provenance,
+            "source_preprocessing": source.preprocessing,
             "status": "reserved",
             "created_at": now(),
             "started_active_seconds": self.clock.checkpoint(),

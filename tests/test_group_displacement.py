@@ -118,9 +118,9 @@ def test_uniform_area_config_and_determinism(cfg, tmp_path):
 
 
 def test_large_group_cap_beyond_frame_room_resamples_inside(cfg, tmp_path):
-    # Cap (~39 px) exceeds the 5 px room on every side; only fitting draws survive.
+    # Cap (~19 px at the 0.15 default) exceeds the 5 px room on every side; only fitting draws survive.
     source, segments, union = group_from_boxes(cfg, tmp_path, [(5, 5, 60, 75), (58, 5, 115, 75)])
-    assert cfg["sampler"]["max_displacement_fraction"] * group_diagonal(union) > 30
+    assert cfg["sampler"]["max_displacement_fraction"] * group_diagonal(union) > 15
     for plan in plans(source, segments, cfg, tmp_path, 10):
         delta = plan.operation_params["displacement_pixels"]
         assert translation_fits(union, delta) and all(abs(v) <= 5 for v in delta)
@@ -134,7 +134,7 @@ def test_edge_group_offscreen_draws_are_resampled(cfg, tmp_path):
 
 
 def test_small_group_moves_stay_within_small_cap(cfg, tmp_path):
-    source, segments, union = group_from_boxes(cfg, tmp_path, [(50, 30, 56, 36)])
+    source, segments, union = group_from_boxes(cfg, tmp_path, [(50, 30, 62, 42)])
     high = cfg["sampler"]["max_displacement_fraction"] * group_diagonal(union)
     assert high < 3
     for plan in plans(source, segments, cfg, tmp_path, 10):

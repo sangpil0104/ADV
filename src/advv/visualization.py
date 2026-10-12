@@ -57,9 +57,18 @@ def render_selection(run_dir, source, segments, selection):
         draw.text((x, y), label, font=_font(18), fill=color, stroke_width=2, stroke_fill="black")
     lines = [
         "SOURCE SELECTION | green=selected accident vehicle | red=excluded",
-        "Automatic CLIP proxy; inspect vehicle IDs. Selection correctness is not guaranteed.",
+        f"Method {selection.get('method', 'unknown')}: automatic CLIP proxy"
+        + (" + deterministic rules" if selection.get("rules") else "")
+        + "; inspect vehicle IDs. Selection correctness is not guaranteed.",
     ]
-    lines += [f"{'SELECT' if d['selected'] else 'EXCLUDE'} {d['segment_id']}" for d in selection["decisions"]]
+    if selection.get("limitations"):
+        lines += textwrap.wrap("Limits: " + selection["limitations"], 110)
+    for d in selection["decisions"]:
+        notes = [d[k] for k in ("excluded_reason",) if d.get(k)]
+        if d.get("duplicate_of"):
+            notes.append("same vehicle as " + d["duplicate_of"].split("_segment_")[-1])
+        suffix = f" ({'; '.join(notes)})" if notes else ""
+        lines.append(f"{'SELECT' if d['selected'] else 'EXCLUDE'} {d['segment_id']}{suffix}")
     canvas = Image.new("RGB", (max(size[0], 900), size[1] + 28 * len(lines)), "#171B24")
     canvas.paste(overlay.convert("RGB"), (0, 0))
     draw = ImageDraw.Draw(canvas)
@@ -329,6 +338,7 @@ def render(run_dir: Path, source: dict, record: dict, settings: dict) -> dict:
         "candidate_id": cid,
         "plan_hash": digest(plan),
         "source_pixel_sha256": source["pixel_sha256"],
+        "source_preprocessing": source.get("preprocessing"),
         "candidate_pixel_sha256": record.get("pixel_sha256"),
         "original_size": [w, h],
         "requested": plan,

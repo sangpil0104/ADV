@@ -22,6 +22,12 @@ dataset:
   - train
   enforce_group_disjoint: true
   enforce_cross_split_hash_disjoint: true
+  # The run snapshot (inputs/images/*.png) is downscaled so its long side is at most this
+  # many pixels; segmentation, selection, sampler, DragFlow and CLIP all use the snapshot,
+  # so accepted images have the snapshot resolution. Originals are never modified and
+  # smaller images are never upscaled. null keeps the original resolution.
+  max_long_side_px: 960
+  downscale_resample: lanczos
 generation:
   source_prompt: A dashcam image of a road traffic accident involving one or more
     vehicles.
@@ -35,8 +41,9 @@ sampler:
   # angle uniform over the directions that keep the group in frame/grid at that r (r is
   # redrawn if none), delta = round(r cos, vertical_scale * r sin). Sources with no valid
   # move are held before generation. Initial values are UNVERIFIED conservative guesses;
-  # decide them with the GPU sweep (SPEC 5.3).
-  max_displacement_fraction: 0.3
+  # decide them with the GPU sweep (SPEC 5.3). max was lowered 0.3 -> 0.15 on 2026-10-12
+  # after visual failures at 0.3 (still unverified).
+  max_displacement_fraction: 0.15
   min_displacement_fraction: 0.03
   vertical_scale: 0.5
   magnitude_distribution: uniform_radius
@@ -102,6 +109,23 @@ visualization:
 report:
   terminal_progress: true
 accident_selection:
-  method: clip_contact_context_v1
-  captions_path: ../prompts/accident_vehicles_v1.json
+  method: clip_contact_context_v2
+  captions_path: ../prompts/accident_vehicles_v2.json
   context_padding: 0.25
+  # Deterministic pre-CLIP rules (v2). Set from the 10 development images (M009); unverified.
+  rules:
+    # Camera car hood: bbox bottom within 5% of image height from the bottom edge,
+    # bbox width >= 60% of image width, area >= 10% of the image.
+    ego_bottom_margin_fraction: 0.05
+    ego_min_width_fraction: 0.6
+    ego_min_area_fraction: 0.1
+    # Two detections with IoU >= this are one vehicle (union mask kept).
+    duplicate_min_iou: 0.5
+    # Two vehicles whose mask gap is at most this x the smaller vehicle's bbox diagonal
+    # count as touching (thin segmentation gaps; masks never grow).
+    contact_gap_fraction: 0.015
+    # In a contact unit, a vehicle smaller than ratio x the largest vehicle whose bbox bottom
+    # is higher by more than gap x the largest vehicle's bbox height is a distant vehicle
+    # overlapping only in perspective; it is excluded without CLIP scoring.
+    distant_max_area_ratio: 0.1
+    distant_min_bottom_gap_fraction: 0.25

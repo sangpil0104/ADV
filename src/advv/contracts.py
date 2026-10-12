@@ -20,6 +20,7 @@ class Source:
     preserve_hint: str | None = None
     label: dict | None = None
     group_inferred: bool = False
+    preprocessing: dict | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)

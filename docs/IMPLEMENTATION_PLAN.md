@@ -1,5 +1,15 @@
 # CLIP 전환 구현 계획
 
+## 2026-10-12: 입력 축소 · 사고 차량 선택 v2 · 이동 상한 0.15 (M009)
+
+- [x] `ingest.py`, `contracts.py`, `config.py`: snapshot 단계에서 긴 변을 `dataset.max_long_side_px`(기본 960, `null`이면 끔)로 축소, `dataset.downscale_resample`(기본 `lanczos`). 확대 없음, 원본 파일 보존. `Source.preprocessing`(원본 크기·snapshot 크기·비율·보간·Pillow 버전·원본 pixel hash)을 sources·후보 record·채택 metadata·export에 기록. recipe 포함.
+- [x] `accident_group.py`: `clip_contact_context_v2`(기본) = 자기 차 보닛 제외, IoU ≥ 0.5 중복 병합(합집합 유지), 작은 차량 대각선 1.5% 이하의 틈 접촉, 원근 겹침 먼 차 분리, CLIP 통과 후 떨어진 작은 먼 단위 제외. 임계값은 `accident_selection.rules`, 문장은 `prompts/accident_vehicles_v2.json`(v1과 같은 문장). v1은 비교용으로 유지. preview에 방법·한계·제외 이유 표시.
+- [x] `sampler.max_displacement_fraction` 기본 0.3 → 0.15(미검증).
+- [x] 저장된 M007/M008 segment 결과 10장에 v2 규칙을 CPU로 다시 적용(로컬 CLIP CPU 재채점, 저장된 GPU 점수와 차이 ≤ 2.3e-7). 표는 [빌드 검증](CLIP_BUILD_VERIFICATION.md).
+- [x] 검증(2026-10-12, conda `ADVV`, `CUDA_VISIBLE_DEVICES=''`): 전체 CPU 테스트 **216개 통과**(181 + 신규 35), ruff 통과. GPU 추론 없음.
+- [ ] GPU 확인 run: 960px snapshot의 실제 Mask R-CNN 재분할 + v2 선택 preview 사람 검수, DragFlow 생성 시간·VRAM(1920×1080 입력의 1800초 timeout 해소 여부).
+- [ ] 04처럼 보닛 제거 뒤 CLIP이 실제 충돌 쌍을 통과시키지 않는 원본, 06처럼 분할기가 놓친 차량의 처리 방침(수동 선택 입력 등) 결정.
+
 ## 2026-10-11: 공통 이동 벡터 크기 상한 (M002, sampler `accident_group_v2`)
 
 - [x] `sampler.py`: x·y 독립 균등(화면 안 어디든) 대신 r ∈ [min, max]×그룹 bbox 대각선, θ ∈ [0, 2π), Δ=(round(r cosθ), round(vertical_scale·r sinθ)). 정수화 후 상한 초과·화면/grid 이탈·grid 항등은 재표본, `geometry_attempts` 소진 시 기존 `DataError`.
@@ -7,7 +17,7 @@
 - [x] CPU 테스트 21개 추가(상·하한, 세로 축소, 결정론, 큰/작은/가장자리 그룹, 유효 이동 없음, 기록 변조, 설정 오류). [SPEC 5.3](../SPEC.md#53-공동-이동).
 - [x] M002-fix(QA 후속): θ를 그 r에서 화면·grid 조건을 만족하는 각도 구간 합집합 위 균등으로 뽑고(없으면 r 재표본), 생성 전 원본별 이동 가능성을 정수 Δ 격자로 결정적으로 판정해 불가 원본을 `held_sources: no_valid_motion`으로 보류(전부 보류 시 `no_movable_sources`). `validate_plan`이 비율 범위·run 설정 일치·θ ∈ Θ(r)를 검사. drag plan footer의 sampling 표시 축약.
 - [x] 검증(2026-10-11, conda `ADVV`, `CUDA_VISIBLE_DEVICES=''`): 전체 CPU 테스트 **181개 통과**(M002 169 + fix 12), ruff 통과. 1280×720 CPU 측정에서 폭 100% 그룹 attempt 실패 0/200(수정 전 QA 38/40). 자세한 수치는 [빌드 검증](CLIP_BUILD_VERIFICATION.md). GPU 추론·wheel 재빌드 없음.
-- [ ] GPU 스윕: `max_displacement_fraction` ∈ {0.1, 0.2, 0.3, 0.5}로 같은 원본·seed에서 후보를 생성해 CLIP 통과율·육안 품질 비교 후 기본값 확정. 현재 초기값(0.3/0.03/0.5)은 미검증.
+- [ ] GPU 스윕: `max_displacement_fraction` ∈ {0.1, 0.15, 0.2, 0.3}로 같은 원본·seed·960px snapshot에서 후보를 생성해 CLIP 통과율·육안 품질 비교 후 기본값 확정. 현재 초기값(0.15/0.03/0.5; 2026-10-12에 0.3에서 낮춤)은 미검증. M007의 0.3 채택 2장은 육안상 실패였다.
 
 ## 2026-10-11: 종류별 시각화 저장
 

@@ -27,7 +27,7 @@ upstream resize·feature-grid 반올림·시작점 centroid 교체를 기록한�
 
 자유형/비볼록 segment는 centroid가 영역 밖일 수 있다. 그룹 가상 중심은 객체 밖에 있어도 유효하다. 전체 mask가 backend에 전달되고 공통 Δ가 보존되어야 하며, 그림만 수정하여 정상 실행처럼 보이게 하지 않는다. adapter가 확인한 실제 값을 확보하지 못하면 `REQUESTED / NOT EXECUTED`로 표시하며 채택 완료의 증거로 쓰지 않는다.
 
-생성 전에 `segments/<source_id>/selection.png`를 저장한다. 초록 mask는 선택, 빨강은 제외된 차량 후보이며 ID를 표시한다. 이 원본 진단은 후보별 탈락 이미지와 구분해 보존한다. 선택이 불확실하거나 차량이 빠졌다면 일반화 성공으로 보고하지 않는다.
+생성 전에 `segments/<source_id>/selection.png`를 저장한다. 초록 mask는 선택, 빨강은 제외된 차량 후보이며 ID를 표시한다. 아래 글에는 선택 방법(`clip_contact_context_v2`면 결정적 규칙 사용 표시)과 한계, 차량별 `SELECT/EXCLUDE`와 제외 이유(`ego_vehicle_hood`, `distant_perspective_overlap`, `distant_separate_unit`, `clip_not_involved`), 중복 병합(`same vehicle as …`)을 적는다. 모든 그림은 run snapshot(긴 변 ≤ `dataset.max_long_side_px`) 좌표계다. 이 원본 진단은 후보별 탈락 이미지와 구분해 보존한다. 선택이 불확실하거나 차량이 빠졌다면 일반화 성공으로 보고하지 않는다.
 
 `accident_group_v2` 계획의 metadata `operation_params.displacement_sampling`에는 표본 r·θ, 그룹 bbox 대각선, 실제 상·하한 픽셀 값, `vertical_scale`, 분포, 가능 방향 크기(`feasible_angle_radians`)가 전체 정밀도로 남는다. drag plan footer에는 이를 줄인 한 줄(`shift=[dx, dy] px | grid shift | r=… px theta=… deg | cap 하한-상한 px (비율 x D) | vertical_scale 분포`, 유효숫자 제한)만 표시한다. 이 값은 계획의 표본 기록이며 실제 이동 측정값이 아니다.
 
@@ -39,7 +39,7 @@ upstream resize·feature-grid 반올림·시작점 centroid 교체를 기록한�
 
 현재 시도의 `attempt_elapsed_seconds`와 앞선 실패를 포함한 `accepted_cost_seconds`를 구분해 표시한다. 예: `이번 시도 60초 / 실패 포함 획득 150초`. 아직 commit 비용이 확정되지 않은 private preview를 최종 시간으로 공개하지 않는다. 실행 전체의 초기화/마지막 overhead와 pending은 report에서 설명한다.
 
-`metadata.json`에는 source/candidate/plan hash, 원본·backend 크기, 요청/실제 점과 mask hash, 변환 정보, 면적 단위, segment ID, 모델/문장 hash, CLIP 판정, 시간 완전성, 렌더링 버전을 남긴다. 그림의 숫자와 accepted record가 같은 commit을 참조하도록 한다.
+`metadata.json`에는 source/candidate/plan hash, 원본 축소 기록(`source_preprocessing`: 원본 크기·snapshot 크기·비율·보간), 원본·backend 크기, 요청/실제 점과 mask hash, 변환 정보, 면적 단위, segment ID, 모델/문장 hash, CLIP 판정, 시간 완전성, 렌더링 버전을 남긴다. 그림의 숫자와 accepted record가 같은 commit을 참조하도록 한다.
 
 ## 4. 저장 시점과 삭제
 

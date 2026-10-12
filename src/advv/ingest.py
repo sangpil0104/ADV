@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import PIL
+from PIL import Image
+
 from .contracts import Source
 from .errors import DataError
 from .storage import atomic_image, digest, file_hash, load_rgb, pixel_hash, safe_id, within
@@ -113,7 +116,37 @@ def scan_sources(cfg: dict) -> tuple[list[Source], dict]:
     return sources, {"duplicates": duplicates, "eligible": len(eligible), "total_unique": len(sources)}
 
 
-def snapshot_sources(sources: list[Source], run_dir: Path) -> list[Source]:
+RESAMPLE = {
+    "lanczos": Image.Resampling.LANCZOS,
+    "bicubic": Image.Resampling.BICUBIC,
+    "box": Image.Resampling.BOX,
+}
+
+
+def downscale(image: Image.Image, max_long_side: int | None, resample: str) -> tuple[Image.Image, dict]:
+    """Shrink only; the whole pipeline then works in the snapshot's pixel grid."""
+    width, height = image.size
+    resized = max_long_side is not None and max(width, height) > max_long_side
+    if resized:
+        scale = max_long_side / max(width, height)
+        size = (max(1, round(width * scale)), max(1, round(height * scale)))
+        image = image.resize(size, RESAMPLE[resample], reducing_gap=None)
+        if min(image.size) < 32:
+            raise DataError("Downscaled image is smaller than 32 pixels per side; raise max_long_side_px")
+    return image, {
+        "policy": "downscale_long_side_v1",
+        "max_long_side_px": max_long_side,
+        "resample": resample,
+        "library": f"Pillow {PIL.__version__}",
+        "resized": resized,
+        "original_size": [width, height],
+        "snapshot_size": list(image.size),
+        "scale": [image.width / width, image.height / height],
+    }
+
+
+def snapshot_sources(sources: list[Source], run_dir: Path, dataset: dict) -> list[Source]:
+    """Originals stay untouched; a (possibly downscaled) PNG copy lives inside the run."""
     result = []
     for source in sources:
         image = load_rgb(Path(source.original_path))
@@ -122,7 +155,18 @@ def snapshot_sources(sources: list[Source], run_dir: Path) -> list[Source]:
             or file_hash(Path(source.original_path)) != source.file_sha256
         ):
             raise DataError(f"Source changed during ingest: {source.source_id}")
+        image, preprocessing = downscale(image, dataset["max_long_side_px"], dataset["downscale_resample"])
+        preprocessing["original_pixel_sha256"] = source.pixel_sha256
         relative = f"inputs/images/{source.source_id}.png"
         atomic_image(within(run_dir, relative), image)
-        result.append(replace(source, image_path=relative))
+        result.append(
+            replace(
+                source,
+                image_path=relative,
+                pixel_sha256=pixel_hash(image),
+                width=image.width,
+                height=image.height,
+                preprocessing=preprocessing,
+            )
+        )
     return result

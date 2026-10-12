@@ -23,6 +23,16 @@ DEFAULT_AUGMENTATION_PROMPT = (
     "Translate all selected accident vehicles together, preserving their relative positions and contact. "
     "Keep visible accident damage and do not turn the scene into normal traffic."
 )
+SELECTORS = ("clip_contact_context_v1", "clip_contact_context_v2")
+SELECTION_RULES = {
+    "ego_bottom_margin_fraction": (0, 0.5),
+    "ego_min_width_fraction": (0, 1),
+    "ego_min_area_fraction": (0, 1),
+    "duplicate_min_iou": (0.05, 1),
+    "contact_gap_fraction": (0, 0.2),
+    "distant_max_area_ratio": (0, 1),
+    "distant_min_bottom_gap_fraction": (0, 10),
+}
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs/advv.clip.local.yaml"
 
@@ -191,8 +201,32 @@ def validate_config(cfg: dict) -> None:
             not {"region_area_fraction", "expansion_pixels"} & s.keys(),
             "Partial vehicle masks are unsupported",
         )
+        require(
+            d["max_long_side_px"] is None
+            or type(d["max_long_side_px"]) is int
+            and d["max_long_side_px"] >= 64,
+            "dataset.max_long_side_px must be null or an integer >= 64",
+        )
+        require(
+            d["downscale_resample"] in ("lanczos", "bicubic", "box"),
+            "dataset.downscale_resample must be lanczos, bicubic or box",
+        )
         selector = cfg["accident_selection"]
-        require(selector["method"] == "clip_contact_context_v1", "Unsupported accident selector")
+        require(selector["method"] in SELECTORS, "Unsupported accident selector")
+        rules = selector.get("rules")
+        if selector["method"] == "clip_contact_context_v1":
+            require(rules is None, "clip_contact_context_v1 has no preprocessing rules; use v2")
+        else:
+            require(
+                isinstance(rules, dict) and set(rules) == set(SELECTION_RULES),
+                f"clip_contact_context_v2 requires accident_selection.rules: {', '.join(SELECTION_RULES)}",
+            )
+            for key, (low, high) in SELECTION_RULES.items():
+                value = rules[key]
+                require(
+                    type(value) in (int, float) and math.isfinite(value) and low <= value <= high,
+                    f"accident_selection.rules.{key} must be in [{low}, {high}]",
+                )
         require(
             type(selector["context_padding"]) in (int, float) and 0 <= selector["context_padding"] <= 1,
             "Invalid vehicle context padding",
