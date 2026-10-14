@@ -12,6 +12,7 @@ from advv.group_geometry import group_grid_geometry, translation_fits
 from advv.ingest import scan_sources
 from advv.sampler import (
     angle_intervals,
+    displacement_floor,
     group_diagonal,
     motion_feasible,
     motion_space,
@@ -60,7 +61,8 @@ def test_cap_floor_vertical_scale_and_record(cfg, tmp_path):
     diagonal = math.hypot(70 - 18, 50 - 20)
     assert group_diagonal(union) == diagonal
     s = cfg["sampler"]
-    low, high = s["min_displacement_fraction"] * diagonal, s["max_displacement_fraction"] * diagonal
+    low, high = displacement_floor(s, diagonal, (120, 80)), s["max_displacement_fraction"] * diagonal
+    assert low == 0.08 * diagonal > 0.03 * math.hypot(120, 80)
     for plan in plans(source, segments, cfg, tmp_path):
         delta = plan.operation_params["displacement_pixels"]
         rec = plan.operation_params["displacement_sampling"]
@@ -72,10 +74,12 @@ def test_cap_floor_vertical_scale_and_record(cfg, tmp_path):
             round(rec["radius_pixels"] * math.cos(rec["angle_radians"])),
             round(0.5 * rec["radius_pixels"] * math.sin(rec["angle_radians"])),
         ]
-        assert math.hypot(*delta) <= high and rec["displacement_norm_pixels"] == math.hypot(*delta)
+        assert low <= math.hypot(*delta) <= high and rec["displacement_norm_pixels"] == math.hypot(*delta)
+        assert rec["image_diagonal_pixels"] == math.hypot(120, 80)
+        assert rec["min_displacement_image_diag_fraction"] == 0.03
         assert abs(delta[1]) <= 0.5 * high + 0.5
         assert translation_fits(union, delta)
-        assert plan.sampler_version == "accident_group_v2"
+        assert plan.sampler_version == "accident_group_v3"
 
 
 def test_vertical_scale_shrinks_only_dy():
@@ -118,12 +122,12 @@ def test_uniform_area_config_and_determinism(cfg, tmp_path):
 
 
 def test_large_group_cap_beyond_frame_room_resamples_inside(cfg, tmp_path):
-    # Cap (~19 px at the 0.15 default) exceeds the 5 px room on every side; only fitting draws survive.
-    source, segments, union = group_from_boxes(cfg, tmp_path, [(5, 5, 60, 75), (58, 5, 115, 75)])
+    # Cap (~17.5 px at the 0.15 default) exceeds the 10 px room on every side; only fitting draws survive.
+    source, segments, union = group_from_boxes(cfg, tmp_path, [(10, 10, 60, 70), (58, 10, 110, 70)])
     assert cfg["sampler"]["max_displacement_fraction"] * group_diagonal(union) > 15
     for plan in plans(source, segments, cfg, tmp_path, 10):
         delta = plan.operation_params["displacement_pixels"]
-        assert translation_fits(union, delta) and all(abs(v) <= 5 for v in delta)
+        assert translation_fits(union, delta) and all(abs(v) <= 10 for v in delta)
 
 
 def test_edge_group_offscreen_draws_are_resampled(cfg, tmp_path):
@@ -134,11 +138,50 @@ def test_edge_group_offscreen_draws_are_resampled(cfg, tmp_path):
 
 
 def test_small_group_moves_stay_within_small_cap(cfg, tmp_path):
+    cfg["sampler"]["min_displacement_image_diag_fraction"] = 0.0
     source, segments, union = group_from_boxes(cfg, tmp_path, [(50, 30, 62, 42)])
     high = cfg["sampler"]["max_displacement_fraction"] * group_diagonal(union)
+    low = cfg["sampler"]["min_displacement_fraction"] * group_diagonal(union)
     assert high < 3
     for plan in plans(source, segments, cfg, tmp_path, 10):
-        assert 0 < math.hypot(*plan.operation_params["displacement_pixels"]) <= high
+        assert low <= math.hypot(*plan.operation_params["displacement_pixels"]) <= high
+
+
+def test_small_group_whose_image_floor_exceeds_cap_is_held(cfg, tmp_path):
+    # Image floor 0.03 x 144.2 = 4.33 px > cap 0.15 x 17 = 2.55 px: held, the cap is never raised.
+    source, segments, union = group_from_boxes(cfg, tmp_path, [(50, 30, 62, 42)])
+    space = space_for(cfg, tmp_path, segments, union, source)
+    assert math.isclose(space.low, 0.03 * math.hypot(120, 80)) and space.low > space.high
+    assert not motion_feasible(space) and not source_motion_feasible(source, segments, cfg, tmp_path)
+    with pytest.raises(DataError, match="No valid nonidentity.*floor"):
+        sample_edit(source, segments, cfg, 0, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "fraction, image_fraction, expected",
+    [(0.08, 0.0, 0.08 * 50), (0.0, 0.03, 0.03 * 500), (0.08, 0.03, 0.03 * 500), (0.4, 0.03, 0.4 * 50)],
+)
+def test_displacement_floor_is_max_of_group_and_image_terms(fraction, image_fraction, expected):
+    settings = {"min_displacement_fraction": fraction, "min_displacement_image_diag_fraction": image_fraction}
+    assert math.isclose(displacement_floor(settings, 50.0, (300, 400)), expected)
+
+
+def test_floor_applies_after_vertical_scale(cfg, tmp_path):
+    # Vertical-only room: |delta| = 0.5 r <= 0.5 cap = 0.075 D < floor 0.08 D, so no valid move.
+    source, segments, union = group_from_boxes(cfg, tmp_path, [(0, 20, 120, 50)])
+    space = space_for(cfg, tmp_path, segments, union, source)
+    assert space.scale * space.high < space.low <= space.high
+    assert not source_motion_feasible(source, segments, cfg, tmp_path)
+    # A free group never gets a rounded |delta| below the floor, including near-vertical draws.
+    source, segments, union = group_from_boxes(cfg, tmp_path, [(40, 25, 80, 55)])
+    space = space_for(cfg, tmp_path, segments, union, source)
+    norms = []
+    for plan in plans(source, segments, cfg, tmp_path, 60):
+        delta = plan.operation_params["displacement_pixels"]
+        rec = plan.operation_params["displacement_sampling"]
+        norms.append(math.hypot(*delta))
+        assert math.hypot(*delta) >= space.low and math.hypot(*delta) >= rec["min_radius_pixels"]
+    assert min(norms) < space.low / space.scale  # The floor is on |delta|, not on r alone.
 
 
 @pytest.mark.parametrize(
@@ -184,12 +227,16 @@ def test_tampered_sampling_record_or_delta_fails_validation(cfg, tmp_path):
     "key, value",
     [
         ("version", "accident_group_v1"),
+        ("version", "accident_group_v2"),
         ("max_displacement_fraction", 0.0),
         ("max_displacement_fraction", 1.5),
         ("max_displacement_fraction", float("nan")),
         ("max_displacement_fraction", True),
         ("min_displacement_fraction", -0.1),
         ("min_displacement_fraction", 0.3),
+        ("min_displacement_image_diag_fraction", -0.01),
+        ("min_displacement_image_diag_fraction", 0.6),
+        ("min_displacement_image_diag_fraction", float("inf")),
         ("vertical_scale", 0.0),
         ("vertical_scale", 1.2),
         ("magnitude_distribution", "gaussian"),
@@ -216,6 +263,8 @@ def space_for(cfg, root, segments, union, source):
 
 def test_full_width_group_samples_inside_feasible_angles(cfg, tmp_path):
     # Zero horizontal room: only near-vertical angles are valid (old uniform-theta draws mostly failed).
+    # vertical_scale 1 so the vertical |delta| can reach the floor (see test_floor_applies_after_vertical_scale).
+    cfg["sampler"]["vertical_scale"] = 1.0
     source, segments, union = group_from_boxes(cfg, tmp_path, [(0, 20, 120, 50)])
     assert source_motion_feasible(source, segments, cfg, tmp_path)
     space = space_for(cfg, tmp_path, segments, union, source)
@@ -243,7 +292,7 @@ def test_angle_intervals_match_pointwise_geometry(cfg, tmp_path):
                 continue
             try:
                 group_grid_geometry(union, delta, members)
-                valid = math.hypot(*delta) <= space.high
+                valid = space.low <= math.hypot(*delta) <= space.high
             except DataError:
                 valid = False
             assert inside == valid
@@ -253,7 +302,7 @@ def test_angle_intervals_match_pointwise_geometry(cfg, tmp_path):
     "boxes, expected",
     [
         ([(30, 20, 70, 50)], True),
-        ([(0, 20, 120, 50)], True),
+        ([(0, 20, 120, 50)], False),  # Vertical-only room: 0.5 x cap < floor.
         ([(0, 1, 120, 79)], False),
         ([(50, 30, 53, 33)], False),
         ([(0, 0, 120, 80)], False),
@@ -284,6 +333,7 @@ def test_sampling_record_checked_against_ranges_and_run_settings(cfg, tmp_path):
     for key, value in [
         ("max_displacement_fraction", 0.25),
         ("min_displacement_fraction", 0.01),
+        ("min_displacement_image_diag_fraction", 0.0),
         ("vertical_scale", 1.0),
         ("magnitude_distribution", "uniform_area"),
     ]:
@@ -291,8 +341,27 @@ def test_sampling_record_checked_against_ranges_and_run_settings(cfg, tmp_path):
         other[key] = value
         with pytest.raises(DataError, match="differ from the run sampler config"):
             validate_plan(plan, source, tmp_path, other)
+    for key, value in [
+        ("feasible_angle_radians", 1.0),
+        ("image_diagonal_pixels", 100.0),
+        ("min_displacement_image_diag_fraction", 0.9),
+    ]:
+        bad = copy.deepcopy(plan)
+        bad.operation_params["displacement_sampling"][key] = value
+        with pytest.raises(DataError):
+            validate_plan(bad, source, tmp_path)
+
+
+def test_recorded_delta_below_floor_fails_validation(cfg, tmp_path):
+    source, segments, _ = group_from_boxes(cfg, tmp_path, [(30, 20, 70, 50)])
+    plan = sample_edit(source, segments, cfg, 0, tmp_path)
+    rec = plan.operation_params["displacement_sampling"]
+    # Raising the recorded floor above the actual |delta| (with consistent radius fields) must fail.
     bad = copy.deepcopy(plan)
-    bad.operation_params["displacement_sampling"]["feasible_angle_radians"] = 1.0
+    bad.operation_params["displacement_sampling"].update(
+        min_displacement_image_diag_fraction=(rec["displacement_norm_pixels"] + 0.5)
+        / rec["image_diagonal_pixels"],
+    )
     with pytest.raises(DataError):
         validate_plan(bad, source, tmp_path)
 
@@ -312,15 +381,17 @@ def test_footer_operation_params_are_short():
                 "min_radius_pixels": 1.4142135623730951,
                 "max_radius_pixels": 14.142135623730951,
                 "min_displacement_fraction": 0.03,
+                "min_displacement_image_diag_fraction": 0.03,
                 "max_displacement_fraction": 0.3,
                 "group_bbox_diagonal_pixels": 47.14045207910317,
+                "image_diagonal_pixels": 144.22205101855957,
                 "displacement_norm_pixels": 12.36931687685298,
                 "feasible_angle_radians": 3.141592653589793,
             },
         }
     )
     assert "shift=[12, -3] px" in text and "grid shift=[6, -2]" in text and "r=12.3 px" in text
-    assert "cap 1.4-14.1 px" in text and "D=47" in text
+    assert "cap 1.4-14.1 px" in text and "D=47" in text and "floor>=0.03 x img diag" in text
     assert "12.345678" not in text and "47.140452" not in text and len(text) < 200
 
 

@@ -5,9 +5,9 @@ import pytest
 from PIL import Image
 
 from advv.accident_group import build_group, contact_components, select_vehicles
-from advv.config import validate_config
+from advv.config import PROJECT_ROOT, validate_config
 from advv.errors import ConfigError
-from advv.storage import atomic_image, file_hash, within
+from advv.storage import atomic_image, digest, file_hash, read_json, within
 from advv.visualization import render_selection
 
 YES = [0.1, 0.2, 0.1, 0.2]
@@ -58,9 +58,34 @@ def by_id(selection):
     return {d["segment_id"][-4:]: d for d in selection["decisions"]}
 
 
-def test_example_uses_v2_rules(cfg):
-    assert cfg["accident_selection"]["method"] == "clip_contact_context_v2"
-    assert cfg["_assets"]["accident_selection"]["version"] == "clip_contact_context_v2"
+FILTER_KEYS = (
+    "detection_min_score",
+    "max_area_fraction",
+    "min_area_fraction",
+    "top_touch_margin_fraction",
+    "top_touch_max_bottom_fraction",
+    "min_bottom_fraction",
+    "min_largest_component_fraction",
+)
+
+
+def as_v2(cfg):
+    old = copy.deepcopy(cfg)
+    for key in FILTER_KEYS:
+        old["accident_selection"]["rules"].pop(key)
+    old["accident_selection"]["method"] = "clip_contact_context_v2"
+    asset = read_json(PROJECT_ROOT / "prompts/accident_vehicles_v2.json")
+    old["_assets"]["accident_selection"] = asset
+    old["_assets"]["accident_selection_sha256"] = digest(asset)
+    validate_config(old)
+    return old
+
+
+def test_example_uses_v3_rules(cfg):
+    assert cfg["accident_selection"]["method"] == "clip_contact_context_v3"
+    assert cfg["_assets"]["accident_selection"]["version"] == "clip_contact_context_v3"
+    v2 = read_json(PROJECT_ROOT / "prompts/accident_vehicles_v2.json")
+    assert cfg["_assets"]["accident_selection"]["criteria"] == v2["criteria"]  # Same CLIP captions.
 
 
 def test_ego_hood_is_excluded_and_does_not_bridge(cfg, tmp_path):
@@ -77,7 +102,7 @@ def test_ego_hood_is_excluded_and_does_not_bridge(cfg, tmp_path):
 
 
 def test_large_vehicle_not_reaching_bottom_is_not_a_hood(cfg, tmp_path):
-    entries, _ = segments_from(tmp_path, [(20, 60, 390, 160)])  # 20% gap to the bottom edge
+    entries, _ = segments_from(tmp_path, [(40, 60, 360, 150)])  # 25% gap to the bottom edge, area 0.36
     selection, _ = run(cfg, tmp_path, entries)
     assert by_id(selection)["0000"]["selected"]
 
@@ -183,7 +208,13 @@ def test_v2_preview_lists_reasons_and_limits(cfg, tmp_path):
         lambda s: s["rules"].update(ego_min_width_fraction=float("nan")),
         lambda s: s["rules"].update(contact_gap_fraction=True),
         lambda s: s.update(method="clip_contact_context_v1"),  # v1 with rules / v2 captions
-        lambda s: s.update(method="clip_contact_context_v3"),
+        lambda s: s.update(method="clip_contact_context_v4"),
+        lambda s: s.update(method="clip_contact_context_v2"),  # v3 filter keys / v3 captions
+        lambda s: s["rules"].pop("detection_min_score"),
+        lambda s: s["rules"].update(detection_min_score=1.5),
+        lambda s: s["rules"].update(max_area_fraction=0.0005),  # below min_area_fraction
+        lambda s: s["rules"].update(top_touch_margin_fraction=0.7),
+        lambda s: s["rules"].update(min_largest_component_fraction=float("inf")),
     ],
 )
 def test_invalid_selection_rule_config(cfg, change):
@@ -213,7 +244,7 @@ def test_separate_tiny_far_unit_passing_clip_is_not_merged_into_group(cfg, tmp_p
             (280, 100, 380, 182),
         ],
     )
-    selection, _ = run(cfg, tmp_path, entries, PerCall([YES] * 6))
+    selection, _ = run(as_v2(cfg), tmp_path, entries, PerCall([YES] * 6))
     d = by_id(selection)
     assert [k for k, v in d.items() if v["selected"]] == ["0000", "0001", "0004"]
     assert d["0002"]["excluded_reason"] == d["0003"]["excluded_reason"] == "distant_separate_unit"

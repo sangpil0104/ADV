@@ -2,7 +2,7 @@
 
 **DragFlow를 이용한 자율주행용 차량 사고 블랙박스 단일 프레임 이미지 증강**
 
-사고 관련 차량을 자동 선택해 전체 마스크를 합치고, 모든 선택 차량에 동일한 무작위 이동 벡터를 적용합니다. 이동 크기는 사고 그룹 bbox 대각선 비율로 상한을 두고 세로 이동을 줄입니다(`accident_group_v2`). 편집 영역 크기는 전체 그룹 면적으로 고정됩니다. DragFlow 후보를 CLIP 문장 5쌍으로 평가해 **1–4번 중 3개 이상 통과하고 5번을 반드시 통과한** 새 이미지를 총 N장 모읍니다. N은 전체 입력의 총량입니다.
+사고 관련 차량을 자동 선택해 전체 마스크를 합치고, 모든 선택 차량에 동일한 무작위 이동 벡터를 적용합니다. 이동 크기는 사고 그룹 bbox 대각선 비율로 상한을, 그룹·이미지 대각선 비율로 하한을 두고 세로 이동을 줄입니다(`accident_group_v3`). 편집 영역 크기는 전체 그룹 면적으로 고정됩니다. DragFlow 후보를 CLIP 문장 5쌍으로 평가해 **1–4번 중 3개 이상 통과하고 5번을 반드시 통과한** 새 이미지를 총 N장 모읍니다. N은 전체 입력의 총량입니다.
 
 ADVV 이름은 유지합니다. `Augmentation using DragFlow with VQA Verification`은 초기 방법의 풀네임이며 현재 검증기는 CLIP입니다.
 
@@ -18,16 +18,16 @@ ADVV 이름은 유지합니다. `Augmentation using DragFlow with VQA Verificati
 
 - 차량 instance segmentation: torchvision Mask R-CNN ResNet50-FPN COCO_V1, car/motorcycle/bus/truck.
 - 입력은 run snapshot에서 긴 변 960px(`dataset.max_long_side_px`, Lanczos)로 축소합니다. 원본 파일은 그대로 두고 작은 이미지는 확대하지 않습니다. 분할·선택·이동·DragFlow·CLIP이 모두 축소 사본을 쓰므로 **채택 이미지도 축소 해상도**입니다. 원본 크기와 축소 비율은 `sources.json`의 `preprocessing`에 남습니다.
-- 원본 접촉 관계와 로컬 CLIP의 객체/맥락 비교로 사고 관련 차량을 추정합니다. 기본 선택기 `clip_contact_context_v2`는 CLIP 앞뒤에 결정적 규칙(자기 차 보닛 제외, 같은 차 중복 병합, 얇은 틈 접촉, 원근으로만 겹친 작은 먼 차 제외)을 더합니다. 선택된 차량 전체의 합집합 mask, 공통 이동 벡터, 원본/feature grid 경계 검사를 사용합니다. 이동 벡터는 크기 r(그룹 대각선의 `min_displacement_fraction`~`max_displacement_fraction`, 기본 0.03~0.15, 2026-10-12에 0.3에서 낮춤)과 방향 θ를 따로 뽑고 세로 성분에 `vertical_scale`(기본 0.5)을 곱합니다. 방향은 그 크기에서 그룹이 화면 안에 남는 각도 구간 안에서만 균등하게 뽑고, 상한 안에서 화면 안 이동이 하나도 없는 원본은 생성 전에 `no_valid_motion`으로 보류해 `state.json`·report에 표시합니다(전부 보류되면 `no_movable_sources`로 중단). 기본값은 GPU 스윕 전의 미검증 추정치입니다. 차량 사이의 빈 공간과 떨어진 성분을 유지합니다.
+- 원본 접촉 관계와 로컬 CLIP의 객체/맥락 비교로 사고 관련 차량을 추정합니다. 기본 선택기 `clip_contact_context_v3`는 CLIP 앞뒤에 결정적 규칙(자기 차 보닛 제외, 같은 차 중복 병합, 검출 오검출 필터(검출 점수 0.7 미만, 면적 너무 크거나 작음, 위 경계에서 내려온 구조물, 지면보다 높은 위치, 여러 조각으로 갈라진 mask), 얇은 틈 접촉, 원근으로만 겹친 작은 먼 차 제외)을 더합니다. v2는 검출 필터가 없는 비교용입니다. 선택된 차량 전체의 합집합 mask, 공통 이동 벡터, 원본/feature grid 경계 검사를 사용합니다. 이동 벡터는 크기 r과 방향 θ를 따로 뽑고 세로 성분에 `vertical_scale`(기본 0.5)을 곱합니다. 상한은 그룹 대각선의 `max_displacement_fraction`(0.15)배, 하한은 그룹 대각선의 `min_displacement_fraction`(0.08)배와 이미지 대각선의 `min_displacement_image_diag_fraction`(0.03)배 중 큰 값이며(960×540에서 최소 33px), 하한·상한 모두 세로 축소 뒤 실제 |Δ|에 적용합니다(2026-10-14). 방향은 그 크기에서 그룹이 화면 안에 남고 |Δ|가 하한·상한 안인 각도 구간에서만 균등하게 뽑고, 이동이 하나도 없는 원본(하한이 상한보다 큰 작은 그룹 포함)은 생성 전에 `no_valid_motion`으로 보류해 `state.json`·report에 표시합니다(전부 보류되면 `no_movable_sources`로 중단). 기본값은 GPU 스윕 전의 미검증 추정치입니다. 차량 사이의 빈 공간과 떨어진 성분을 유지합니다.
 - 로컬 CLIP ViT-L/14의 raw cosine 비교, 선택 `--prompt`, 총 N장 반복·중단·재개.
 - 채택 전용 시각화·export, 기존 비채택 상세 산출물 정리, 실패 포함 시간 기록.
 - GPU 두 개당 후보 작업 하나를 실행하고, 모든 작업이 총 N장을 공유합니다.
 - 모든 worker를 **conda ADVV의 동일한 Python**으로 실행합니다. 기존 venv는 사용하지 않습니다.
-- **CPU 테스트 216개·lint 통과**(2026-10-12, 입력 축소·선택 v2 규칙·상한 0.15 추가 후; GPU 숨김 상태에서 실행). 축소 입력과 v2 선택의 GPU 실행은 아직 하지 않았습니다. v0.4.1 wheel 빌드는 상한 추가 전에 확인했습니다. 전체 그룹·공식 좌표/affine 함수·기존 quota/재개/삭제 계약을 검증했습니다. `image1` 실제 CPU 분할+CLIP 선택 점검에서 두 사고 차량을 선택했습니다. 검증 수량·빌드 결과는 [검증 기록](docs/CLIP_BUILD_VERIFICATION.md)에 남깁니다.
+- **CPU 테스트 248개·lint 통과**(2026-10-14, 이동 하한 상향·검출 필터 v3 추가 후; GPU 숨김 상태에서 실행). 축소 입력과 v2 선택의 GPU 실행(blackbox_002)은 했고, v3 선택과 새 하한은 저장된 분할 결과로 CPU 재적용만 했습니다(GPU 생성은 아직). v0.4.1 wheel 빌드는 상한 추가 전에 확인했습니다. 전체 그룹·공식 좌표/affine 함수·기존 quota/재개/삭제 계약을 검증했습니다. `image1` 실제 CPU 분할+CLIP 선택 점검에서 두 사고 차량을 선택했습니다. 검증 수량·빌드 결과는 [검증 기록](docs/CLIP_BUILD_VERIFICATION.md)에 남깁니다.
 
 **CPU 계약 검증과 실제 생성 이미지의 품질 평가는 구분합니다.** 저장된 실행에 CLIP 채택 결과가 있어도 전체 사고 차량의 정확한 선택·공동 이동이나 물리적 타당성을 보장하지 않습니다. 기존 6개 실행의 채택 이미지 51장에는 종류별 시각화와 생성 이미지·drag plan 모음을 적용했습니다. 이 시각화 갱신은 GPU 재추론 없이 수행했습니다. 상세 범위는 [현재 빌드 검증](docs/CLIP_BUILD_VERIFICATION.md), 과거 Qwen 결과는 [legacy 기록](docs/RUN_VERIFICATION.md)을 참고하세요.
 
-사고 차량 선택은 검증되지 않은 자동 추정 baseline입니다. `segments/<source_id>/selection.png`에서 초록색 선택 차량과 ID를 먼저 확인하세요. preview에는 선택 방법·한계와 차량별 제외 이유(`ego_vehicle_hood`, `distant_perspective_overlap`, `distant_separate_unit`, `clip_not_involved`, 중복 병합)가 적힙니다. 원근상 겹침은 실제 접촉과 다를 수 있고, 분할되지 않거나 일부만 분할된 차량(예: 옆으로 누운 차량)은 선택할 수 없습니다. 선택 차량이 없으면 `no_eligible_sources`로 멈추며 임의의 차량을 대신 사용하지 않습니다.
+사고 차량 선택은 검증되지 않은 자동 추정 baseline입니다. `segments/<source_id>/selection.png`에서 초록색 선택 차량과 ID를 먼저 확인하세요. preview에는 선택 방법·한계와 차량별 제외 이유(`ego_vehicle_hood`, 검출 필터 사유와 측정값, `distant_perspective_overlap`, `distant_separate_unit`, `clip_not_involved`, 중복 병합)가 적힙니다. 원근상 겹침은 실제 접촉과 다를 수 있고, 분할되지 않거나 일부만 분할된 차량(예: 옆으로 누운 차량)은 선택할 수 없습니다. 선택 차량이 없으면 `no_eligible_sources`로 멈추며 임의의 차량을 대신 사용하지 않습니다.
 
 채택 결과의 `visualizations/comparison/<candidate_id>.png`에는 전체 그룹과 **계획된** 목표 윤곽을 표시합니다. `metadata.json`과 record의 `generation_info.motion_diagnostics`는 차량별 외형 매칭 이동 추정치를 제공합니다. 이 수치는 진단용이며 CLIP 채택 조건을 추가하거나 실제 이동 성공을 인증하지 않습니다.
 
@@ -58,7 +58,7 @@ advv run 10 --gpus 4,5,6,7 --image image1.png
 
 원본 segmentation은 시작할 때 첫 묶음의 첫 GPU에서 수행하고 cache를 공유합니다. 두 작업은 독립적으로 진행하며, 채택·중복 검사·수량 갱신은 하나의 coordinator가 담당합니다. **채택 수 + 진행 중 후보 수가 N 이하**가 되도록 예약하므로 10장을 초과하지 않습니다. 9장 채택 후에는 남은 후보 하나만 진행합니다. 최종 10장이 저장되면 모든 worker를 종료합니다.
 
-`--config`를 생략하면 저장소 기준 `configs/advv.clip.local.yaml`을 자동 사용합니다. 2026-10-12 이후 코드는 설정에 `dataset.max_long_side_px`, `dataset.downscale_resample`이 있어야 하고, 기본 선택기 v2는 `accident_selection.rules`와 `prompts/accident_vehicles_v2.json`을 씁니다. 예시는 [configs/advv.example.yaml](configs/advv.example.yaml)입니다. 다른 작업 디렉터리에서 실행해도 같은 경로입니다. `--input-dir` 옵션은 제거했습니다. 기본 입력 폴더에 사진을 넣으면 됩니다. 새 서버에서 경로나 실험 설정을 바꿔야 할 때만 YAML 또는 선택 `--config`를 사용합니다.
+`--config`를 생략하면 저장소 기준 `configs/advv.clip.local.yaml`을 자동 사용합니다. 2026-10-12 이후 코드는 설정에 `dataset.max_long_side_px`, `dataset.downscale_resample`이 있어야 하고, 기본 선택기 v3는 `accident_selection.rules`(v2 키 + 검출 필터 키 7개)와 `prompts/accident_vehicles_v3.json`을 쓰고, sampler는 `accident_group_v3`와 `sampler.min_displacement_image_diag_fraction`이 필요합니다(2026-10-14). 예시는 [configs/advv.example.yaml](configs/advv.example.yaml)입니다. 다른 작업 디렉터리에서 실행해도 같은 경로입니다. `--input-dir` 옵션은 제거했습니다. 기본 입력 폴더에 사진을 넣으면 됩니다. 새 서버에서 경로나 실험 설정을 바꿔야 할 때만 YAML 또는 선택 `--config`를 사용합니다.
 
 `--run-id`를 생략하면 UTC timestamp와 임의 식별자로 고유한 폴더 이름을 만들고 터미널에 출력합니다. 이름과 증강 지시는 선택적으로 지정할 수 있습니다.
 

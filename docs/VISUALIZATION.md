@@ -27,9 +27,9 @@ upstream resize·feature-grid 반올림·시작점 centroid 교체를 기록한�
 
 자유형/비볼록 segment는 centroid가 영역 밖일 수 있다. 그룹 가상 중심은 객체 밖에 있어도 유효하다. 전체 mask가 backend에 전달되고 공통 Δ가 보존되어야 하며, 그림만 수정하여 정상 실행처럼 보이게 하지 않는다. adapter가 확인한 실제 값을 확보하지 못하면 `REQUESTED / NOT EXECUTED`로 표시하며 채택 완료의 증거로 쓰지 않는다.
 
-생성 전에 `segments/<source_id>/selection.png`를 저장한다. 초록 mask는 선택, 빨강은 제외된 차량 후보이며 ID를 표시한다. 아래 글에는 선택 방법(`clip_contact_context_v2`면 결정적 규칙 사용 표시)과 한계, 차량별 `SELECT/EXCLUDE`와 제외 이유(`ego_vehicle_hood`, `distant_perspective_overlap`, `distant_separate_unit`, `clip_not_involved`), 중복 병합(`same vehicle as …`)을 적는다. 모든 그림은 run snapshot(긴 변 ≤ `dataset.max_long_side_px`) 좌표계다. 이 원본 진단은 후보별 탈락 이미지와 구분해 보존한다. 선택이 불확실하거나 차량이 빠졌다면 일반화 성공으로 보고하지 않는다.
+생성 전에 `segments/<source_id>/selection.png`를 저장한다. 초록 mask는 선택, 빨강은 제외된 차량 후보이며 ID를 표시한다. 아래 글에는 선택 방법(`clip_contact_context_v2`/`v3`면 결정적 규칙 사용 표시)과 한계, 차량별 `SELECT/EXCLUDE`와 제외 이유(`ego_vehicle_hood`, v3 검출 필터 `low_detection_score`·`mask_too_large`·`mask_too_small`·`elevated_top_structure`·`above_ground_level`·`fragmented_mask`, `distant_perspective_overlap`, `distant_separate_unit`, `clip_not_involved`), 검출 필터에 걸린 차량의 측정값(점수·면적 비·bbox 위/아래 끝 비·가장 큰 조각 비), 중복 병합(`same vehicle as …`)을 적는다. 모든 그림은 run snapshot(긴 변 ≤ `dataset.max_long_side_px`) 좌표계다. 이 원본 진단은 후보별 탈락 이미지와 구분해 보존한다. 선택이 불확실하거나 차량이 빠졌다면 일반화 성공으로 보고하지 않는다.
 
-`accident_group_v2` 계획의 metadata `operation_params.displacement_sampling`에는 표본 r·θ, 그룹 bbox 대각선, 실제 상·하한 픽셀 값, `vertical_scale`, 분포, 가능 방향 크기(`feasible_angle_radians`)가 전체 정밀도로 남는다. drag plan footer에는 이를 줄인 한 줄(`shift=[dx, dy] px | grid shift | r=… px theta=… deg | cap 하한-상한 px (비율 x D) | vertical_scale 분포`, 유효숫자 제한)만 표시한다. 이 값은 계획의 표본 기록이며 실제 이동 측정값이 아니다.
+`accident_group_v3` 계획의 metadata `operation_params.displacement_sampling`에는 표본 r·θ, 그룹 bbox 대각선, 이미지 대각선, 실제 상·하한 픽셀 값(하한은 세로 축소 후 |Δ| 기준), 비율, `vertical_scale`, 분포, 가능 방향 크기(`feasible_angle_radians`)가 전체 정밀도로 남는다. drag plan footer에는 이를 줄인 한 줄(`shift=[dx, dy] px | grid shift | r=… px theta=… deg | cap 하한-상한 px (비율 x D=…, floor>=비율 x img diag) | vertical_scale 분포`, 유효숫자 제한)만 표시한다. 이 값은 계획의 표본 기록이며 실제 이동 측정값이 아니다.
 
 채택 metadata와 footer에는 차량별 외형 template 매칭 이동 추정·잔차를 표시한다. 매칭 불가능하면 `unmeasurable`이며, 이 진단은 실제 사고 차량 동일성·이동 성공의 자동 인증이 아니다.
 

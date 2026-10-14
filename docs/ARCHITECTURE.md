@@ -1,6 +1,6 @@
 # 아키텍처와 CLIP 전환 설계
 
-기준: [SPEC v0.13](../SPEC.md), 2026-10-12 (입력 축소·선택 v2 반영). **v0.4.0**은 사고 차량 전체 공동 이동 입력을 구현한다. 선택·기하·공식 affine 함수의 CPU 검증과 실제 image1의 CPU 선택 점검을 했으며, 실제 GPU 생성에서의 이동 품질은 별도 검증 대상이다.
+기준: [SPEC v0.14](../SPEC.md), 2026-10-14 (입력 축소·선택 v2, 이동 하한 상향·검출 필터 선택 v3 반영). **v0.4.0**은 사고 차량 전체 공동 이동 입력을 구현한다. 선택·기하·공식 affine 함수의 CPU 검증과 실제 image1의 CPU 선택 점검을 했으며, 실제 GPU 생성에서의 이동 품질은 별도 검증 대상이다.
 
 ## 1. 모듈별 변경 경계
 
@@ -9,8 +9,8 @@
 | `cli.py`, `config.py` | 기본 설정/입출력 경로, 선택 run ID/prompt, GPU 쌍 분할 및 재개 recipe 고정 |
 | `prepare.py`, `preflight.py` | Qwen/venv 필수 조건 제거, 단일 conda·CLIP·segmenter·로컬 가중치 검사 |
 | `contracts.py`, `ingest.py` | Source 계보 유지; Segment/EditRequest/CLIPResult/TimingRecord 계약 추가. snapshot 단계에서 긴 변 `dataset.max_long_side_px`(기본 960) 초과 시 축소(확대 없음), `Source.preprocessing`에 원본 크기·비율·보간 기록 |
-| `segmentation.py`, `accident_group.py` | 전체 instance mask 검증, 접촉 관계별 CLIP source 선택, 전체 합집합/선택 provenance. `clip_contact_context_v2`(기본): 보닛 제외 → IoU 중복 병합 → 상대 틈 접촉 그래프 → 원근 겹침 먼 차 분리 → CLIP → 떨어진 작은 먼 단위 제외 |
-| `sampler.py`, `group_geometry.py` | 전체 그룹 면적 고정, 원본/feature grid 안의 공통 비항등 이동; `accident_group_v2`는 크기 r(그룹 bbox 대각선 비율 상·하한)·방향 θ 분리 표본 + 세로 축소. θ는 그 r에서 화면·grid 조건을 만족하는 각도 구간 위 균등; 이동 가능한 Δ가 없는 원본은 생성 전에 판정해 보류 |
+| `segmentation.py`, `accident_group.py` | 전체 instance mask 검증, 접촉 관계별 CLIP source 선택, 전체 합집합/선택 provenance. `clip_contact_context_v3`(기본): 보닛 제외 → IoU 중복 병합 → 차량 단위 검출 오검출 필터(점수·면적·위 경계 구조물·지면 높이·조각) → 상대 틈 접촉 그래프 → 원근 겹침 먼 차 분리 → CLIP → 떨어진 작은 먼 단위 제외. v2는 필터 단계만 없음 |
+| `sampler.py`, `group_geometry.py` | 전체 그룹 면적 고정, 원본/feature grid 안의 공통 비항등 이동; `accident_group_v3`는 크기 r·방향 θ 분리 표본 + 세로 축소. 상한 = 그룹 bbox 대각선 비율, 하한 = max(그룹 대각선 비율, 이미지 대각선 비율)이며 둘 다 세로 축소·정수화 후 |Δ|에 적용. θ는 그 r에서 화면·grid·|Δ| 조건을 만족하는 각도 구간 위 균등; 이동 가능한 Δ가 없는(하한 > 상한 포함) 원본은 생성 전에 판정해 보류 |
 | `backends/dragflow.py`, `backends/group_adapter.py` | contour loader 우회, 단일 full-union region, 공통 grid Δ hook, 별도 repair support |
 | `motion.py` | CPU 차량별 appearance matching 이동 진단; 채택 조건 추가 없음 |
 | `backends/clip.py` | 10문장 embedding, 전체 프레임 입력, raw cosine 10개 반환 |

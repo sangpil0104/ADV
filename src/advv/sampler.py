@@ -14,7 +14,7 @@ from .group_geometry import feature_grid, group_grid_geometry, resize_region
 from .segmentation import load_mask
 from .storage import atomic_image, digest, file_hash, read_json, within
 
-SAMPLER_VERSION = "accident_group_v2"
+SAMPLER_VERSION = "accident_group_v3"
 MAGNITUDE_DISTRIBUTIONS = ("uniform_radius", "uniform_area")
 SAMPLING_KEYS = {
     "magnitude_distribution",
@@ -24,22 +24,30 @@ SAMPLING_KEYS = {
     "min_radius_pixels",
     "max_radius_pixels",
     "min_displacement_fraction",
+    "min_displacement_image_diag_fraction",
     "max_displacement_fraction",
     "group_bbox_diagonal_pixels",
+    "image_diagonal_pixels",
     "displacement_norm_pixels",
     "feasible_angle_radians",
 }
+MAX_IMAGE_FLOOR = 0.5
 SETTING_KEYS = (
     "magnitude_distribution",
     "vertical_scale",
     "min_displacement_fraction",
+    "min_displacement_image_diag_fraction",
     "max_displacement_fraction",
 )
 
 
 @dataclass(frozen=True)
 class MotionSpace:
-    """Bounding boxes (inclusive) and limits that decide whether an integer group shift is valid."""
+    """Bounding boxes (inclusive) and limits that decide whether an integer group shift is valid.
+
+    ``low`` floors the rounded |delta| (after vertical_scale), ``high`` caps it; low > high means
+    no valid move (the source is held, the cap is never raised to the floor).
+    """
 
     size: tuple[int, int]
     grid: tuple[int, int]
@@ -71,6 +79,13 @@ def polar_displacement(radius: float, angle: float, vertical_scale: float) -> li
     return [round(radius * math.cos(angle)), round(vertical_scale * radius * math.sin(angle))]
 
 
+def displacement_floor(settings: dict, diagonal: float, size) -> float:
+    return max(
+        settings["min_displacement_fraction"] * diagonal,
+        settings["min_displacement_image_diag_fraction"] * math.hypot(*size),
+    )
+
+
 def motion_space(mask, members, settings: dict) -> MotionSpace:
     h, w = mask.shape
     grid = feature_grid(w, h)
@@ -87,20 +102,22 @@ def motion_space(mask, members, settings: dict) -> MotionSpace:
         grid=grid,
         bbox=(int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())),
         grid_bbox=(int(gxs.min()), int(gys.min()), int(gxs.max()), int(gys.max())),
-        low=settings["min_displacement_fraction"] * diagonal,
+        low=displacement_floor(settings, diagonal, (w, h)),
         high=settings["max_displacement_fraction"] * diagonal,
         scale=settings["vertical_scale"],
     )
 
 
 def valid_deltas(space: MotionSpace, dx, dy):
-    """Vectorized group_grid_geometry fit/nonidentity test plus the rounded-norm cap."""
+    """Vectorized group_grid_geometry fit/nonidentity test plus the rounded-norm floor and cap."""
     (w, h), (gw, gh) = space.size, space.grid
     x0, y0, x1, y1 = space.bbox
     gx0, gy0, gx1, gy1 = space.grid_bbox
     fx, fy = np.round(dx * gw / w), np.round(dy * gh / h)
+    norm = np.hypot(dx, dy)
     return (
-        (np.hypot(dx, dy) <= space.high)
+        (norm <= space.high)
+        & (norm >= space.low)
         & (x0 + dx >= 0)
         & (x1 + dx < w)
         & (y0 + dy >= 0)
@@ -142,6 +159,8 @@ def pick_angle(starts, ends, u: float) -> float:
 
 def motion_feasible(space: MotionSpace) -> bool:
     """Exact: some valid integer shift has a rounding cell meeting the open radius band (low, high)."""
+    if space.low > space.high:
+        return False
     (w, h), (x0, y0, x1, y1) = space.size, space.bbox
     reach_x, reach_y = math.floor(space.high), math.floor(space.scale * space.high + 0.5)
     xs = np.arange(max(-x0, -reach_x), min(w - 1 - x1, reach_x) + 1)
@@ -188,6 +207,11 @@ def sample_edit(source: Source, segments: dict, cfg: dict, attempt_index: int, r
     space = motion_space(mask, members, settings)
     low, high, scale = space.low, space.high, space.scale
     distribution = settings["magnitude_distribution"]
+    if low > high:
+        raise DataError(
+            f"No valid nonidentity whole accident group translation: displacement floor {low:.1f} px "
+            f"exceeds the cap {high:.1f} px for this group; no partial-mask fallback"
+        )
     for _ in range(settings["geometry_attempts"]):
         radius = sample_radius(rng, low, high, distribution)
         # Uniform over the directions that keep the group in frame/grid at this radius.
@@ -197,7 +221,7 @@ def sample_edit(source: Source, segments: dict, cfg: dict, attempt_index: int, r
         feasible = float((ends - starts).sum())
         angle = pick_angle(starts, ends, float(rng.random()))
         delta = polar_displacement(radius, angle, scale)
-        if not 0 <= angle < 2 * math.pi or math.hypot(*delta) > high:  # Rounding must not exceed the cap.
+        if not 0 <= angle < 2 * math.pi or not low <= math.hypot(*delta) <= high:  # Rounded |delta|.
             continue
         try:
             geometry = group_grid_geometry(mask, delta, members)
@@ -217,8 +241,10 @@ def sample_edit(source: Source, segments: dict, cfg: dict, attempt_index: int, r
         "min_radius_pixels": low,
         "max_radius_pixels": high,
         "min_displacement_fraction": settings["min_displacement_fraction"],
+        "min_displacement_image_diag_fraction": settings["min_displacement_image_diag_fraction"],
         "max_displacement_fraction": settings["max_displacement_fraction"],
         "group_bbox_diagonal_pixels": diagonal,
+        "image_diagonal_pixels": math.hypot(w, h),
         "displacement_norm_pixels": math.hypot(*delta),
         "feasible_angle_radians": feasible,
     }
@@ -326,6 +352,7 @@ def validate_sampling(params: dict, mask, members, delta, settings: dict | None 
         raise DataError("Invalid displacement sampling values")
     if (
         not 0 <= sampling["min_displacement_fraction"] < sampling["max_displacement_fraction"] <= 1
+        or not 0 <= sampling["min_displacement_image_diag_fraction"] <= MAX_IMAGE_FLOOR
         or not 0 < sampling["vertical_scale"] <= 1
         or sampling["magnitude_distribution"] not in MAGNITUDE_DISTRIBUTIONS
     ):
@@ -342,6 +369,7 @@ def validate_sampling(params: dict, mask, members, delta, settings: dict | None 
 
     if (
         not same(sampling["group_bbox_diagonal_pixels"], diagonal)
+        or not same(sampling["image_diagonal_pixels"], math.hypot(*mask.shape))
         or not same(sampling["min_radius_pixels"], low)
         or not same(sampling["max_radius_pixels"], high)
         or not 0 <= sampling["angle_radians"] < 2 * math.pi
@@ -353,7 +381,7 @@ def validate_sampling(params: dict, mask, members, delta, settings: dict | None 
         )
         != list(delta)
         or not same(sampling["displacement_norm_pixels"], math.hypot(*delta))
-        or math.hypot(*delta) > high
+        or not low <= math.hypot(*delta) <= high
     ):
         raise DataError(
             "Displacement is outside the recorded cap/floor or does not match its sampling record"

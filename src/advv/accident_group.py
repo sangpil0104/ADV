@@ -16,6 +16,11 @@ SELECTION_LIMITATIONS = (
     "Undetected or partially detected vehicles (e.g. overturned cars) cannot be selected; "
     "projected contact is not physical contact; rule thresholds were set from 10 development images."
 )
+FILTER_LIMITATIONS = (
+    " Detection filters (v3) can also drop a real accident vehicle that is low-score, fragmented by "
+    "occlusion, very large, or reaching the top edge; such a source then moves an incomplete group."
+)
+RULE_SELECTORS = ("clip_contact_context_v2", "clip_contact_context_v3")
 
 
 def selection_identity(cfg):
@@ -142,6 +147,39 @@ def distant_from(vmasks, v, anchor, rules):
     return None
 
 
+def detection_filter(mask, confidence, size, rules):
+    """Reasons (in rule order) a merged vehicle unit looks like a false detection, plus its metrics."""
+    from scipy import ndimage
+
+    width, height = size
+    _, y0, _, y1 = _box(mask)
+    area = int(mask.sum())
+    labels, _ = ndimage.label(mask, structure=np.ones((3, 3)))
+    metrics = {
+        "confidence": confidence,
+        "area_fraction": area / (width * height),
+        "bbox_top_fraction": y0 / height,
+        "bbox_bottom_fraction": y1 / height,
+        "largest_component_fraction": int(np.bincount(labels.ravel())[1:].max()) / area,
+    }
+    checks = (
+        ("low_detection_score", confidence < rules["detection_min_score"]),
+        ("mask_too_large", metrics["area_fraction"] > rules["max_area_fraction"]),
+        ("mask_too_small", metrics["area_fraction"] < rules["min_area_fraction"]),
+        (
+            "elevated_top_structure",
+            y0 < rules["top_touch_margin_fraction"] * height
+            and y1 <= rules["top_touch_max_bottom_fraction"] * height,
+        ),
+        ("above_ground_level", y1 <= rules["min_bottom_fraction"] * height),
+        (
+            "fragmented_mask",
+            metrics["largest_component_fraction"] < rules["min_largest_component_fraction"],
+        ),
+    )
+    return [name for name, hit in checks if hit], metrics
+
+
 def _largest(vmasks, members):
     return max(members, key=lambda v: (int(vmasks[v].sum()), -v))
 
@@ -182,7 +220,7 @@ def select_vehicles(image, segments, root, cfg, scorer):
     masks = [load_mask(root, e["mask_path"], e["mask_sha256"], image.size) for e in segments]
     if cfg["accident_selection"]["method"] == "clip_contact_context_v1":
         return _select_v1(image, segments, masks, cfg, scorer)
-    return _select_v2(image, segments, masks, cfg, scorer)
+    return _select_rules(image, segments, masks, cfg, scorer)
 
 
 def _select_v1(image, segments, masks, cfg, scorer):
@@ -216,8 +254,15 @@ def _select_v1(image, segments, masks, cfg, scorer):
     }
 
 
-def _select_v2(image, segments, masks, cfg, scorer):
+def _select_rules(image, segments, masks, cfg, scorer):
+    method = cfg["accident_selection"]["method"]
+    if method not in RULE_SELECTORS:
+        raise DataError(f"Unsupported accident selector {method}")
     rules = cfg["accident_selection"]["rules"]
+    if method == "clip_contact_context_v3" and any(
+        type(e.get("confidence")) not in (int, float) or not math.isfinite(e["confidence"]) for e in segments
+    ):
+        raise DataError("Detection filter requires a finite detection confidence per segment")
     ids = [e["segment_id"] for e in segments]
     decisions = {
         i: {"segment_id": ids[i], "selected": False, "association_index": None} for i in range(len(ids))
@@ -229,10 +274,12 @@ def _select_v2(image, segments, masks, cfg, scorer):
         else:
             candidates.append(i)
     vehicles = vehicle_units(masks, segments, candidates, rules["duplicate_min_iou"])
-    vmasks = [np.logical_or.reduce([masks[i] for i in v]) for v in vehicles]
     for members in vehicles:
         for i in members[1:]:
             decisions[i]["duplicate_of"] = ids[members[0]]
+    if method == "clip_contact_context_v3":
+        vehicles = _filter_detections(vehicles, masks, segments, decisions, image.size, rules)
+    vmasks = [np.logical_or.reduce([masks[i] for i in v]) for v in vehicles]
     gap_fraction = rules["contact_gap_fraction"]
     active, detached = detach_distant(vehicles, vmasks, gap_fraction, rules)
 
@@ -279,15 +326,31 @@ def _select_v2(image, segments, masks, cfg, scorer):
                     mark(v, "distant_separate_unit", distant_from(vmasks, v, anchor, rules))
     return {
         "identity": selection_identity(cfg),
-        "method": "clip_contact_context_v2",
+        "method": method,
         "decisions": [decisions[i] for i in range(len(ids))],
         "associations": associations,
         "association_policy": "overlap_touch_or_relative_gap_no_mask_growth",
         "rules": dict(rules),
         "status": "proxy_selection_requires_review",
-        "limitations": SELECTION_LIMITATIONS,
+        "limitations": SELECTION_LIMITATIONS
+        + (FILTER_LIMITATIONS if method == "clip_contact_context_v3" else ""),
         "candidate_acceptance_rule_changed": False,
     }
+
+
+def _filter_detections(vehicles, masks, segments, decisions, size, rules):
+    """Drop whole vehicle units (duplicates merged) before contact analysis; never split a unit."""
+    kept = []
+    for members in vehicles:
+        mask = np.logical_or.reduce([masks[i] for i in members])
+        reasons, metrics = detection_filter(mask, float(segments[members[0]]["confidence"]), size, rules)
+        for i in members:
+            decisions[i]["detection_filter"] = {"reasons": reasons, **metrics}
+            if reasons:
+                decisions[i]["excluded_reason"] = reasons[0]
+        if not reasons:
+            kept.append(members)
+    return kept
 
 
 def build_group(source_id, size, segments, selection, root):

@@ -65,10 +65,18 @@ def render_selection(run_dir, source, segments, selection):
         lines += textwrap.wrap("Limits: " + selection["limitations"], 110)
     for d in selection["decisions"]:
         notes = [d[k] for k in ("excluded_reason",) if d.get(k)]
+        f = d.get("detection_filter") or {}
+        if f.get("reasons"):
+            notes = ["+".join(f["reasons"])]
+            notes.append(
+                f"score {f['confidence']:.2f}, area {f['area_fraction']:.3f}, "
+                f"top {f['bbox_top_fraction']:.2f}, bottom {f['bbox_bottom_fraction']:.2f}, "
+                f"largest piece {f['largest_component_fraction']:.2f}"
+            )
         if d.get("duplicate_of"):
             notes.append("same vehicle as " + d["duplicate_of"].split("_segment_")[-1])
         suffix = f" ({'; '.join(notes)})" if notes else ""
-        lines.append(f"{'SELECT' if d['selected'] else 'EXCLUDE'} {d['segment_id']}{suffix}")
+        lines += textwrap.wrap(f"{'SELECT' if d['selected'] else 'EXCLUDE'} {d['segment_id']}{suffix}", 110)
     canvas = Image.new("RGB", (max(size[0], 900), size[1] + 28 * len(lines)), "#171B24")
     canvas.paste(overlay.convert("RGB"), (0, 0))
     draw = ImageDraw.Draw(canvas)
@@ -119,11 +127,13 @@ def params_summary(params: dict) -> str:
     s = params.get("displacement_sampling")
     if isinstance(s, dict):
         try:
+            floor = s.get("min_displacement_image_diag_fraction")
             parts.append(
                 f"r={s['radius_pixels']:.1f} px theta={math.degrees(s['angle_radians']):.1f} deg "
                 f"| cap {s['min_radius_pixels']:.1f}-{s['max_radius_pixels']:.1f} px "
-                f"({s['min_displacement_fraction']:.4g}-{s['max_displacement_fraction']:.4g} x D={s['group_bbox_diagonal_pixels']:.0f}) "
-                f"| vertical_scale={s['vertical_scale']:.4g} {s['magnitude_distribution']}"
+                f"({s['min_displacement_fraction']:.4g}-{s['max_displacement_fraction']:.4g} x D={s['group_bbox_diagonal_pixels']:.0f}"
+                + ("" if floor is None else f", floor>={floor:.4g} x img diag")
+                + f") | vertical_scale={s['vertical_scale']:.4g} {s['magnitude_distribution']}"
             )
         except (KeyError, TypeError, ValueError):
             parts.append(f"sampling={_short(s)}")

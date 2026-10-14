@@ -1,5 +1,15 @@
 # CLIP 전환 구현 계획
 
+## 2026-10-14: 이동 하한 상향 · 검출 오검출 필터 (M011, sampler `accident_group_v3`, 선택 `clip_contact_context_v3`)
+
+- [x] `sampler.py`, `config.py`: `min_displacement_fraction` 기본 0.03 → 0.08, 절대 하한 `min_displacement_image_diag_fraction`(기본 0.03×이미지 대각선) 추가. 하한 L = max(두 항)을 세로 축소·정수화 후 실제 |Δ|에 적용(각도 구간 계산·사전 이동 가능 판정·`validate_plan` 모두). L > U(작은 그룹)는 상한을 올리지 않고 `no_valid_motion` 보류. 계획 기록에 `min_displacement_image_diag_fraction`, `image_diagonal_pixels` 추가. sampler version `accident_group_v3`(v2 거부).
+- [x] `accident_group.py`, `config.py`: `clip_contact_context_v3`(기본) = v2 + 보닛 제외·중복 병합 뒤 차량 단위 검출 필터(점수 0.7, 면적 0.001–0.4, 위 경계 구조물, 지면 높이, 조각 0.7). 문장은 `prompts/accident_vehicles_v3.json`(같은 문장). 제외 사유·측정값을 `detection_filter`로 기록, `selection.png`에 표시. v1·v2는 비교용으로 유지.
+- [x] blackbox_002 저장 분할 10장에 v2/v3 CPU 재적용, 새 이동 분포 측정. 표는 [빌드 검증](CLIP_BUILD_VERIFICATION.md).
+- [x] 검증(2026-10-14, conda `ADVV`, `CUDA_VISIBLE_DEVICES=''`): 전체 CPU 테스트 **248개 통과**(216 + 신규 32), ruff 통과. GPU 추론 없음.
+- [ ] `configs/advv.clip.local.yaml`에 새 키 반영(현재 local yaml은 새 코드에서 sampler version 오류로 로드 실패).
+- [ ] GPU 확인 run(새 run_id): v3 선택 preview 검수, 새 하한에서 생성 품질.
+- [ ] 03처럼 절대 하한이 상한을 넘는 작은 그룹을 보류로 둘지, 절대 하한을 낮출지 결정.
+
 ## 2026-10-12: 입력 축소 · 사고 차량 선택 v2 · 이동 상한 0.15 (M009)
 
 - [x] `ingest.py`, `contracts.py`, `config.py`: snapshot 단계에서 긴 변을 `dataset.max_long_side_px`(기본 960, `null`이면 끔)로 축소, `dataset.downscale_resample`(기본 `lanczos`). 확대 없음, 원본 파일 보존. `Source.preprocessing`(원본 크기·snapshot 크기·비율·보간·Pillow 버전·원본 pixel hash)을 sources·후보 record·채택 metadata·export에 기록. recipe 포함.
@@ -17,7 +27,7 @@
 - [x] CPU 테스트 21개 추가(상·하한, 세로 축소, 결정론, 큰/작은/가장자리 그룹, 유효 이동 없음, 기록 변조, 설정 오류). [SPEC 5.3](../SPEC.md#53-공동-이동).
 - [x] M002-fix(QA 후속): θ를 그 r에서 화면·grid 조건을 만족하는 각도 구간 합집합 위 균등으로 뽑고(없으면 r 재표본), 생성 전 원본별 이동 가능성을 정수 Δ 격자로 결정적으로 판정해 불가 원본을 `held_sources: no_valid_motion`으로 보류(전부 보류 시 `no_movable_sources`). `validate_plan`이 비율 범위·run 설정 일치·θ ∈ Θ(r)를 검사. drag plan footer의 sampling 표시 축약.
 - [x] 검증(2026-10-11, conda `ADVV`, `CUDA_VISIBLE_DEVICES=''`): 전체 CPU 테스트 **181개 통과**(M002 169 + fix 12), ruff 통과. 1280×720 CPU 측정에서 폭 100% 그룹 attempt 실패 0/200(수정 전 QA 38/40). 자세한 수치는 [빌드 검증](CLIP_BUILD_VERIFICATION.md). GPU 추론·wheel 재빌드 없음.
-- [ ] GPU 스윕: `max_displacement_fraction` ∈ {0.1, 0.15, 0.2, 0.3}로 같은 원본·seed·960px snapshot에서 후보를 생성해 CLIP 통과율·육안 품질 비교 후 기본값 확정. 현재 초기값(0.15/0.03/0.5; 2026-10-12에 0.3에서 낮춤)은 미검증. M007의 0.3 채택 2장은 육안상 실패였다.
+- [ ] GPU 스윕: `max_displacement_fraction` ∈ {0.1, 0.15, 0.2, 0.3}로 같은 원본·seed·960px snapshot에서 후보를 생성해 CLIP 통과율·육안 품질 비교 후 기본값 확정. 현재 초기값(상한 0.15, 하한 max(0.08·D, 0.03·이미지 대각선), 세로 0.5; 2026-10-12에 상한 0.3→0.15, 2026-10-14에 하한 0.03→0.08과 절대 하한 추가)은 미검증. M007의 0.3 채택 2장은 육안상 실패였다.
 
 ## 2026-10-11: 종류별 시각화 저장
 

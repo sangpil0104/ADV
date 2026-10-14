@@ -1,6 +1,6 @@
 # ADVV 구현 명세
 
-- 문서 버전: **0.13**, 갱신일: **2026-10-12** (0.11: 공통 이동 벡터 크기 상한, sampler `accident_group_v2`; 0.12: 가능 방향 조건부 θ, 이동 불가 원본 사전 보류; 0.13: 입력 긴 변 축소 snapshot, 사고 차량 선택 `clip_contact_context_v2` 결정적 규칙, 이동 상한 기본 0.15)
+- 문서 버전: **0.14**, 갱신일: **2026-10-14** (0.11: 공통 이동 벡터 크기 상한, sampler `accident_group_v2`; 0.12: 가능 방향 조건부 θ, 이동 불가 원본 사전 보류; 0.13: 입력 긴 변 축소 snapshot, 사고 차량 선택 `clip_contact_context_v2` 결정적 규칙, 이동 상한 기본 0.15; 0.14: 이동 하한 상향·절대 하한·세로 축소 후 |Δ| 기준 sampler `accident_group_v3`, 검출 오검출 필터 선택기 `clip_contact_context_v3`)
 - 실행 schema: **2.0** — 기존 VQA schema 1.1 run과 재개 호환되지 않음
 - 상태: **v0.4.0에 전체 사고 차량 선택·공동 이동 입력·시각화·진단을 구현했다.** CPU 계약과 실제 image1의 CPU 선택은 확인했으며, 새 경로의 GPU 생성 품질은 미검증이다.
 - 프로젝트 이름 ADVV 유지. 기존 풀네임의 VQA는 초기 방법을 가리킨다.
@@ -130,12 +130,12 @@ Source는 `source_id`, 입력 경로·hash, 정규화 크기, `group_id`, `split
 1. 원본에서 차량별 instance mask를 얻는다. 검출 차량과 사고 관련 차량은 같은 집합이 아니다.
 2. 사고 관련 차량 선택 단계에서 사고에 직접 관여한 차량 ID를 **전부** 선택한다. 추돌·측면 충돌·연쇄 사고·단독 전복/충돌 등 사고 형태를 추돌로 한정하지 않는다. 일반 통행/주차 차량, 구경하는 사람, 도로와 건물은 포함하지 않는다. 파편도 이번 이동 대상에 포함하지 않는다.
 3. 자동 선택을 기본 목표로 유지한다. 단순히 모든 차량을 합치거나 가장 큰 차량·가까운 차량을 골랐다는 이유만으로 사고 차량을 찾았다고 표시하지 않는다. 기존 Mask R-CNN은 vehicle instance mask 후보를 주는 모듈이고 사고 관련성 판별기는 아니다.
-4. `clip_contact_context_v1`을 source selector baseline으로 사용한다(아래 v2가 기본, v1은 비교용으로 남긴다). 고정 Mask R-CNN의 차량 전체 mask에 겹침/8방향 접촉 그래프를 만들고 연결된 차량을 관계 평가 단위로 묶는다. 최대 면적/최단 거리 선택은 하지 않는다. 단독 차량은 별도 단위로 남긴다. 각 단위의 전체 mask cutout(나머지 회색)과 bbox 각 변에 크기의 25%를 더한 주변 맥락 crop을 만든다. 두 view 모두 사고 caption cosine > 정상 caption cosine일 때 구성 차량들을 선택한다. 단독/접촉 그룹용 영어 2쌍은 `prompts/accident_vehicles_v1.json`에 고정하고, scorer는 후보 verifier와 같은 로컬 CLIP revision/letterbox를 사용한다. contact 그룹의 dilation은 인접성 조회에만 쓰며 객체 mask를 늘리지 않는다.
+4. `clip_contact_context_v1`을 source selector baseline으로 사용한다(아래 v3가 기본, v1·v2는 비교용으로 남긴다). 고정 Mask R-CNN의 차량 전체 mask에 겹침/8방향 접촉 그래프를 만들고 연결된 차량을 관계 평가 단위로 묶는다. 최대 면적/최단 거리 선택은 하지 않는다. 단독 차량은 별도 단위로 남긴다. 각 단위의 전체 mask cutout(나머지 회색)과 bbox 각 변에 크기의 25%를 더한 주변 맥락 crop을 만든다. 두 view 모두 사고 caption cosine > 정상 caption cosine일 때 구성 차량들을 선택한다. 단독/접촉 그룹용 영어 2쌍은 `prompts/accident_vehicles_v1.json`에 고정하고, scorer는 후보 verifier와 같은 로컬 CLIP revision/letterbox를 사용한다. contact 그룹의 dilation은 인접성 조회에만 쓰며 객체 mask를 늘리지 않는다.
    - 선택 결과·관계 단위·view별 점수·구성 ID·각 mask/hash·그룹 mask/hash·설정/문장/model revision hash를 원본별 cache에 기록한다.
    - 0점 차이는 선택 실패, 비유한/누락 점수는 기술 오류다. 양쪽 view를 통과한 단위가 없으면 해당 원본은 후보 생성 대상에서 제외한다. 모든 차량을 합치는 fallback은 없다.
    - **검증되지 않은 자동 추정 baseline**이다. 투영상 접촉은 실제 접촉이 아닐 수 있고, 떨어진 사고 차량이나 멀리 있는 차량을 놓칠 수 있다. 분할 누락·가림·연쇄 오류도 가능하다. image1을 포함한 개발 이미지의 선택 성공은 일반화 검증이 아니다. 원본 preview와 별도 수동 검수로 완전성을 평가해야 한다.
    - source selector용 crop/4문장은 후보 채택용 전체 프레임/고정 10문장과 분리한다. `--prompt`로 선택 기준을 바꾸지 않는다.
-6. **`clip_contact_context_v2` (기본, 2026-10-12).** v1의 CLIP 판정(문장 2쌍·두 view·margin > 0)은 그대로 두고, 그 앞뒤에 결정적 규칙을 더한다. 문장 파일은 `prompts/accident_vehicles_v2.json`(문장은 v1과 같음), 임계값은 `accident_selection.rules`에 둔다. 임계값은 M007/M008 개발 이미지 10장의 실측 사례로 정한 **미검증 값**이다.
+6. **`clip_contact_context_v2` (2026-10-12, v3의 기반).** v1의 CLIP 판정(문장 2쌍·두 view·margin > 0)은 그대로 두고, 그 앞뒤에 결정적 규칙을 더한다. 문장 파일은 `prompts/accident_vehicles_v2.json`(문장은 v1과 같음), 임계값은 `accident_selection.rules`에 둔다. 임계값은 M007/M008 개발 이미지 10장의 실측 사례로 정한 **미검증 값**이다.
    1. **자기 차 보닛 제외**: mask bbox 아래 끝이 화면 아래 경계에서 `ego_bottom_margin_fraction`(0.05)×높이 안이고, bbox 폭 ≥ `ego_min_width_fraction`(0.6)×폭, 면적 ≥ `ego_min_area_fraction`(0.1)×화면이면 `ego_vehicle_hood`로 제외한다. 접촉 그래프에도 넣지 않는다(다른 차량을 잇는 다리 역할 방지). 실측: 04의 0006은 아래 경계까지 19px(1.8%), 폭 94%, 면적 29%.
    2. **같은 차 중복 병합**: IoU ≥ `duplicate_min_iou`(0.5)인 검출은 한 차량으로 묶는다. 대표는 confidence가 가장 높은 mask이고 나머지는 `duplicate_of`로 기록한다. 픽셀을 버리지 않도록 차량 mask는 합집합이며 선택 여부도 함께 따른다. 차량 1대는 단독 caption을 쓴다. 실측: 중복 IoU 0.54–0.97, 서로 다른 접촉 차량의 최대 IoU 0.27.
    3. **얇은 틈 접촉**: 두 차량 mask 사이 거리가 `contact_gap_fraction`(0.015)×작은 차량 bbox 대각선 이하이면(최소 8방향 접촉) 접촉으로 본다. mask는 늘리지 않는다. 실측: 01의 흰 해치백-초록 SUV 틈 4px(작은 대각선의 0.0085); 접촉하지 않는 다른 쌍은 모두 0.025 이상.
@@ -143,6 +143,17 @@ Source는 `source_id`, 입력 경로·hash, 정규화 크기, `group_id`, `split
    5. **떨어진 작은 먼 단위 제외**: CLIP을 통과한 단위가 여럿이면 선택 차량 중 가장 큰 차량을 핵심으로 보고, 핵심을 포함하지 않은 단위의 모든 차량이 위 4번 조건으로 먼 차이면 그 단위를 `distant_separate_unit`으로 제외한다(`clip_passed`는 기록에 남김). 저해상도에서 먼 차량 행렬이 CLIP을 통과하는 사례(01·02, 960px 모의)를 막는다.
    - 결과에 `method`, `rules`, 차량별 `excluded_reason`(`ego_vehicle_hood`·`distant_perspective_overlap`·`distant_separate_unit`·`clip_not_involved`)·`duplicate_of`, 단위별 `vehicles`, `limitations`를 기록하고 `selection.png`에 방법·한계·제외 이유를 표시한다. 계약은 그대로다: 사고 관련 차량만 전부 선택, 무관 차량 합치기 fallback 없음, 선택 0대면 그 원본 보류.
    - 규칙으로 해결하지 못하는 한계: Mask R-CNN이 차량을 검출하지 못하거나 일부만 검출하면 선택할 수 없다(06의 옆으로 누운 차량은 끝부분 0007만 검출되고 CLIP도 비관여로 판정). 보닛을 제거하면 CLIP 판정이 바뀔 수 있다(04의 실제 충돌 두 대는 보닛 없이 foreground margin −0.004로 통과하지 못해 0대가 되었다). 저장된 10장 결과에 새 규칙을 다시 적용한 표는 [빌드 검증](docs/CLIP_BUILD_VERIFICATION.md)에 있다.
+7. **`clip_contact_context_v3` (기본, 2026-10-14).** v2와 같지만, 보닛 제외·중복 병합 뒤 접촉 분석 전에 **검출 오검출 필터**를 차량 단위(중복 병합된 합집합 mask, confidence는 그 단위의 최고 검출 점수)로 적용한다. 960px 실제 분할(blackbox_002)에서 04는 건물 외벽(0008, bus 0.508)이, 07은 보행자 옆 조각(0004·0007·0009)이 사고 그룹에 들어간 오류를 막기 위한 것이다. 문장은 `prompts/accident_vehicles_v3.json`(v1/v2와 같은 문장), 임계값은 `accident_selection.rules`에 v2 키와 함께 둔다. **미검증 값**이며 blackbox_002 저장 결과 10장으로 정했다(근거 표는 [빌드 검증](docs/CLIP_BUILD_VERIFICATION.md)).
+   - Mask R-CNN 허용 클래스는 설정 검증에서 COCO car(3)·motorcycle(4)·bus(6)·truck(8)로 고정이며, backend가 클래스·점수(`confidence`)를 segment마다 기록한다. 점수가 없거나 비유한이면 v3 선택은 `DataError`다.
+   - 규칙(어느 하나라도 해당하면 그 차량 단위 전체 제외, 기록은 규칙 순서의 모든 사유와 측정값):
+     - `low_detection_score`: 최고 검출 점수 < `detection_min_score`(0.7). 같은 차의 낮은 점수 중복 검출은 높은 점수 대표와 합쳐지므로 남는다(accident_car_tree 0009=0.578).
+     - `mask_too_large`: 단위 mask 면적 > `max_area_fraction`(0.4)×화면. 0.15는 실제 사고 차(accident_car_tree 단위 0.252)를 버리므로 쓰지 않는다. 건물 외벽(0.155)은 면적으로 구분되지 않는다.
+     - `mask_too_small`: 면적 < `min_area_fraction`(0.001)×화면(960×540에서 약 518px). 선택된 사고 차량 최소 0.0098.
+     - `elevated_top_structure`: bbox 위 끝 < `top_touch_margin_fraction`(0.05)×높이 **그리고** bbox 아래 끝 ≤ `top_touch_max_bottom_fraction`(0.6)×높이. 위 경계에서 내려온 구조물(건물·간판)이다. 위 경계까지 닿는 가까운 버스·트럭은 아래 끝이 낮으므로 남는다.
+     - `above_ground_level`: bbox 아래 끝 ≤ `min_bottom_fraction`(0.1)×높이. 지면에 닿을 수 없는 높이(하늘·간판).
+     - `fragmented_mask`: 8방향 연결 성분 중 가장 큰 것 / 단위 면적 < `min_largest_component_fraction`(0.7). 보행자 등으로 갈라진 조각 검출(07의 0004: 0.548).
+   - 제외된 차량은 `excluded_reason`(첫 사유)과 `detection_filter`(`reasons`, `confidence`, `area_fraction`, `bbox_top_fraction`, `bbox_bottom_fraction`, `largest_component_fraction`)를 기록하고 접촉 그래프·CLIP에 넣지 않는다(다리 역할 방지). 남은 차량도 `detection_filter` 측정값을 남긴다. `selection.png`에 사유와 측정값을 표시한다.
+   - 계약은 v2와 같다: 사고 관련 차량만 전부 선택, 무관 차량 합치기 fallback 없음, 선택 0대면 보류. 필터는 진짜 사고 차량(낮은 점수, 가림으로 갈라진 mask, 매우 큰 근접 차량)을 버릴 수 있고, 그 경우 그룹이 불완전해진다. 이 한계를 `limitations`에 기록한다. v3 재적용 결과 04는 0대(보류), 07은 0003·0005만 남는다.
 5. 신뢰할 그룹이 없으면 해당 원본을 보류하고 원인을 기록한다. 다른 차량을 임의로 대신 선택하지 않는다. 차량 1대의 단독 사고도 유효한 그룹이다.
 
 ### 5.2 전체 마스크와 범위
@@ -163,32 +174,37 @@ Source는 `source_id`, 입력 경로·hash, 정규화 크기, `group_id`, `split
 차량 i와 j의 상대 위치 = 이동 전과 동일
 ```
 
-회전·크기 변경·차량별 독립 이동은 이번 태스크에 넣지 않는다. 객체 mask 전체가 화면 안에 남고 아래 크기 상한을 지키는 범위에서 비항등 이동을 무작위로 선택한다. 이동은 무작위지만 사고 그룹의 포함 범위는 원본에서 확정한 mask를 유지한다. 이동 후의 물리/사고 의미 판정은 기존 CLIP 5쌍 정책을 유지한다.
+회전·크기 변경·차량별 독립 이동은 이번 태스크에 넣지 않는다. 객체 mask 전체가 화면 안에 남고 아래 크기 하한·상한을 지키는 범위에서 비항등 이동을 무작위로 선택한다. 이동은 무작위지만 사고 그룹의 포함 범위는 원본에서 확정한 mask를 유지한다. 이동 후의 물리/사고 의미 판정은 기존 CLIP 5쌍 정책을 유지한다.
 
 **이동 크기 상한 (`accident_group_v2`, 2026-10-11).** v1은 x·y를 각각 "그룹이 화면 안에 남는 모든 값"에서 균등 표본해 이동이 지나치게 커지고 생성이 망가졌다(사용자 보고). v2는 크기와 방향을 분리한다.
 
 ```text
 D = 그룹 합집합 mask bbox 대각선 (px, 경계 포함 폭/높이)
-r ~ [min_displacement_fraction·D, max_displacement_fraction·D]   (magnitude_distribution)
+L = max(min_displacement_fraction·D, min_displacement_image_diag_fraction·√(W²+H²))   (v3 하한)
+U = max_displacement_fraction·D                                                           (상한)
+L > U 이면 이동 불가(사전 보류). 상한을 하한까지 올리지 않는다.
+r ~ [L, U]   (magnitude_distribution)
 Θ(r) = {θ ∈ [0, 2π) : Δ(r, θ)가 아래 채택 조건을 만족}            (구간들의 합집합, 정확 계산)
 Θ(r) = ∅ 이면 r을 다시 뽑는다; 아니면 θ ~ U(Θ(r))
 Δ = (round(r cos θ), round(vertical_scale · r sin θ))
-채택 조건: |Δ| ≤ max_displacement_fraction·D (정수화 후에도) ∧ 원본/feature grid 안 ∧ grid 비항등
+채택 조건: L ≤ |Δ| ≤ U (정수화·세로 축소 후의 실제 |Δ|) ∧ 원본/feature grid 안 ∧ grid 비항등
 ```
 
-- 상한은 이미지 크기가 아니라 사고 그룹 크기에 비례한다. 하한은 r에 적용되며, 세로 방향에서는 실제 |Δ|가 `vertical_scale·r`까지 줄 수 있다. 사실상 무변화인 이동은 하한과 기존 grid 비항등 검사로 함께 제외한다.
+- **이동 하한 상향 (`accident_group_v3`, 2026-10-14 사용자 결정).** blackbox_002의 잘못 생성된 사례 원인 중 하나가 너무 작은 이동(예: 05의 Δ=(3,7), |Δ|=7.6px)이었다. 하한을 그룹 대각선 0.03→**0.08**배로 올리고, 그룹 크기와 무관한 절대 하한 `min_displacement_image_diag_fraction`(기본 **0.03**×이미지 대각선, 960×540에서 33.0px)을 더했다. 하한은 r이 아니라 **세로 축소 후 정수화된 실제 |Δ|**에 적용한다(v2는 r 기준이라 세로 이동에서 |Δ|가 `vertical_scale·r`까지 줄었다). 따라서 기본값(0.08/0.15/0.5)에서는 세로 성분만 있는 이동이 불가능하다(0.5·U = 0.075·D < 0.08·D). 수평에서 약 ±77.6° 안의 방향만 남는다.
+- **작은 그룹(L > U) 처리: 보류.** 절대 하한이 상한보다 큰 그룹(기본값에서 D < 0.2×이미지 대각선, 960×540에서 약 220px)은 `no_valid_motion`으로 생성 전에 보류한다. 상한을 하한까지 허용하지 않은 이유: (1) 상한 0.15·D는 0.3에서 실제 실패를 보고 낮춘 값이라 작은 그룹에만 이를 넘기면 같은 실패를 되풀이할 수 있다; (2) L = U이면 반지름이 한 값으로 고정되어 정수 |Δ|가 띠 [L, U]에 거의 들지 않아 표본이 사실상 결정되거나 실패한다; (3) 보류는 결정적이고 `state.json`·report에 남아 사용자가 설정으로 조정할 수 있다. 사용자가 작은 그룹을 살리려면 `min_displacement_image_diag_fraction`을 낮춘다.
+- 상한은 이미지 크기가 아니라 사고 그룹 크기에 비례한다. 사실상 무변화인 이동은 하한과 기존 grid 비항등 검사로 함께 제외한다.
 - `vertical_scale`은 세로(원근 깊이) 이동을 줄여 크기 변화 없는 평행 이동의 원근 어색함을 낮추려는 것이다. 1이면 원형, 0.5이면 가로 반지름의 절반인 타원 안에서 표본한다.
 - `uniform_radius`(기본)는 크기별로 같은 확률을 준다. `uniform_area`(r=√(r₀²+u(r₁²−r₀²)))는 원판 면적에 균등하여 큰 이동 쪽으로 치우친다. 큰 이동이 실패 원인이었으므로 기본은 r 균등이다.
 - **가능 방향 안에서 뽑기(2026-10-11 사용자 결정).** Δ는 θ에 대해 구간별 상수이므로, r마다 `r cosθ`와 `vertical_scale·r sinθ`가 반정수를 지나는 각도로 원을 나누고 각 구간의 Δ를 채택 조건으로 판정해 Θ(r)를 정확히 구한다. θ는 Θ(r) 위에서 균등(조건부 균등)이다. 따라서 실현 분포는 다음과 같다.
   - r: 설정 분포(`uniform_radius`/`uniform_area`)를 "Θ(r)가 비지 않는 r"로 제한한 것. 화면 여유가 상한보다 큰 일반 그룹에서는 설정 분포 그대로다.
   - θ | r: Θ(r) 위 균등. 전 방향이 가능하면 U[0, 2π)와 같고, 큰 그룹·가장자리 그룹에서는 여유 있는 방향에 몰린다(예: 폭 전체를 덮는 그룹은 세로 방향만). 방향별 확률을 원래 원 위 균등으로 해석하지 않는다.
   - 계획 기록 `feasible_angle_radians`(=|Θ(r)|)로 표본 시점의 가능 방향 크기를 남긴다. 2π보다 작으면 방향이 제한된 표본이다.
-- 상한·세로 축소·r 하한·정수화 후 상한 검사는 그대로다. 정수화 결과는 마지막에 다시 검사하며, 실패한 draw(Θ(r)=∅ 포함)는 `geometry_attempts` 예산 안에서 다시 뽑는다. 결정론: 같은 rng에서 r, (Θ(r)가 비지 않을 때만) θ 순서로 draw.
-- **이동 불가 원본 사전 보류.** 생성 전에 원본별로 상한·하한·화면·feature grid·grid 비항등 조건을 함께 만족하는 이동이 하나라도 있는지 결정적으로 판정한다: 상한·화면 범위 안의 모든 정수 Δ를 조사해, 유효한 Δ 중 반올림 셀 `[dx±0.5]×[dy±0.5]`의 r 범위(r = √(x² + (y/vertical_scale)²))가 열린 구간 (하한, 상한)과 겹치는 것이 있는지 본다. 그룹·선택 차량이 DragFlow feature 해상도에서 사라지는 경우도 이동 불가다. 없으면 원본을 `held_sources[<source_id>] = "no_valid_motion"`으로 `state.json`에 기록하고 report(`held_sources`, `per_source.held`)에 표시하며 그 run에서 다시 시도하지 않는다(재개 시에도 기록된 보류를 유지). 모든 사고 그룹 원본이 보류되면 `no_movable_sources`로 run을 멈춘다(`no_eligible_sources`와 같은 방식의 명확한 종료 코드).
+- 상한·세로 축소·정수화 후 |Δ| 하한·상한 검사를 함께 적용한다. 정수화 결과는 마지막에 다시 검사하며, 실패한 draw(Θ(r)=∅ 포함)는 `geometry_attempts` 예산 안에서 다시 뽑는다. 결정론: 같은 rng에서 r, (Θ(r)가 비지 않을 때만) θ 순서로 draw.
+- **이동 불가 원본 사전 보류.** 생성 전에 원본별로 상한·하한·화면·feature grid·grid 비항등 조건을 함께 만족하는 이동이 하나라도 있는지 결정적으로 판정한다: L > U이면 바로 불가로 판정한다. 그 밖에는 상한·화면 범위 안의 모든 정수 Δ를 조사해, L ≤ |Δ| ≤ U를 포함한 조건을 만족하는 유효한 Δ 중 반올림 셀 `[dx±0.5]×[dy±0.5]`의 r 범위(r = √(x² + (y/vertical_scale)²))가 열린 구간 (하한, 상한)과 겹치는 것이 있는지 본다. 그룹·선택 차량이 DragFlow feature 해상도에서 사라지는 경우도 이동 불가다. 없으면 원본을 `held_sources[<source_id>] = "no_valid_motion"`으로 `state.json`에 기록하고 report(`held_sources`, `per_source.held`)에 표시하며 그 run에서 다시 시도하지 않는다(재개 시에도 기록된 보류를 유지). 모든 사고 그룹 원본이 보류되면 `no_movable_sources`로 run을 멈춘다(`no_eligible_sources`와 같은 방식의 명확한 종료 코드).
 - 이동이 가능한 원본이라도 한 attempt가 `geometry_attempts`를 모두 소진할 수 있다(가능한 r 범위가 매우 좁은 경우). 이때 부분 mask나 상한 완화 없이 그 attempt를 `error`/`sampling_error`로 기록하고, 원본 순환에 따라 같은 원본의 다음 attempt에서 새 seed로 다시 표본한다. 원본 단위 보류는 위 사전 판정에서만 일어난다.
-- 초기값 `max=0.15`(2026-10-12에 0.3에서 낮춤: M007의 0.3 채택 2장이 육안상 실패), `min=0.03`, `vertical_scale=0.5`, `uniform_radius`는 **미검증 보수적 추정이며 GPU 실측 스윕으로 결정한다.** 작은 상한은 이동 전후 그룹 footprint가 크게 겹쳐 DragFlow가 새로 칠할 빈자리를 줄이려는 선택이다.
-- 계획 `operation_params.displacement_sampling`에 r, θ, 실제 상한/하한 픽셀 값, 비율, D, `vertical_scale`, 분포, |Δ|, `feasible_angle_radians`를 기록한다. `validate_plan`은 마스크에서 D와 Θ(r)를 다시 계산해 일치·θ ∈ Θ(r)를 확인하고, 비율 범위(`0 ≤ min < max ≤ 1`, `0 < vertical_scale ≤ 1`, 분포 이름)와 run 설정의 sampler 값(비율·`vertical_scale`·분포)과의 일치를 검사한다. 결정론은 기존과 같다: `(run.seed, source_id, source pixel hash, attempt_index)` → `np.random.default_rng`.
-- v1 설정/계획은 v2 코드에서 거부되며, 코드·recipe가 바뀌므로 기존 run은 재개할 수 없다. 새 run으로 실행한다.
+- 초기값 `max=0.15`(2026-10-12에 0.3에서 낮춤: M007의 0.3 채택 2장이 육안상 실패), `min=0.08`(2026-10-14에 0.03에서 올림), `min_displacement_image_diag_fraction=0.03`(2026-10-14 추가), `vertical_scale=0.5`, `uniform_radius`는 **미검증 추정이며 GPU 실측 스윕으로 결정한다.** 작은 상한은 이동 전후 그룹 footprint가 크게 겹쳐 DragFlow가 새로 칠할 빈자리를 줄이려는 선택이다.
+- 계획 `operation_params.displacement_sampling`에 r, θ, 실제 상한/하한 픽셀 값(`min_radius_pixels`=L, `max_radius_pixels`=U), 비율 3개, D, 이미지 대각선(`image_diagonal_pixels`), `vertical_scale`, 분포, |Δ|, `feasible_angle_radians`를 기록한다. `validate_plan`은 마스크에서 D·이미지 대각선·L·U와 Θ(r)를 다시 계산해 일치·θ ∈ Θ(r)·L ≤ |Δ| ≤ U를 확인하고, 비율 범위(`0 ≤ min < max ≤ 1`, `0 ≤ image 비율 ≤ 0.5`, `0 < vertical_scale ≤ 1`, 분포 이름)와 run 설정의 sampler 값(비율 3개·`vertical_scale`·분포)과의 일치를 검사한다. 결정론은 기존과 같다: `(run.seed, source_id, source pixel hash, attempt_index)` → `np.random.default_rng`.
+- v1·v2 설정/계획은 v3 코드에서 거부되며, 코드·recipe가 바뀌므로 기존 run(blackbox_002 포함)은 재개할 수 없다. 새 run으로 실행한다.
 
 start/end는 공통 이동의 표시용/생성기 기준점이다. 여러 성분의 중심점은 객체 사이 빈 공간에 있을 수 있으므로 이전의 “모든 실제 centroid는 단일 segment 내부” 제약을 그대로 적용하지 않는다. 외곽선 기반 선택에 필요한 객체 내부점과 그룹 이동의 가상 중심을 명확히 구분하고, centroid 교체·feature-grid 반올림 후에도 의도한 **공통 Δ**가 유지되도록 adapter에서 좌표를 보정·기록해야 한다.
 
@@ -327,7 +343,8 @@ conda ADVV에 torch 2.5.1, torchvision 0.20.1, Transformers 4.48.0, Diffusers 0.
 - CLIP의 물리/사고 오수락·오배제와 전체 처리량·GPU 메모리.
 - 이동 크기 상한 `max_displacement_fraction` ∈ {0.1, 0.15, 0.2, 0.3}(하한·세로 계수 고정, 960px snapshot) 스윕의 CLIP 통과율·육안 품질 비교로 초기값 확정.
 - 960px 축소 입력의 DragFlow 생성 시간·VRAM, 1920×1080 timeout 해소 여부.
-- `clip_contact_context_v2` 선택의 GPU 재분할(960px) 결과와 사람 검수.
+- `clip_contact_context_v3` 필터의 다른 원본에서의 오검출·누락률과 사람 검수(임계값은 blackbox_002 10장으로만 정함).
+- 이동 하한 0.08·D / 0.03·이미지 대각선의 생성 품질(작은 이동 실패가 줄었는지)과 보류되는 작은 그룹 비율.
 - 실제 GPU 두 묶음의 동시 생성·VRAM·공유 quota 종료 및 중단·재개; 과거 결과 정리는 임시 fixture에서 확인했고 실제 사용은 다음 run부터 수행한다.
 
 위 항목은 CPU 계약 검사로 대신할 수 없는 실험이다. 현재 확인한 범위는 [빌드 검증](docs/CLIP_BUILD_VERIFICATION.md), 구현 상태와 완료 기준은 [IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md)에 정의한다.

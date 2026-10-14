@@ -36,6 +36,7 @@ def group_fixture(cfg, root):
             {
                 "segment_id": f"car_{i}",
                 "class_id": 3,
+                "confidence": 0.9,
                 "mask_path": path,
                 "mask_sha256": file_hash(within(root, path)),
                 "area_pixels": int(mask.sum()),

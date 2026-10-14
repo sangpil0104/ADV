@@ -33,18 +33,24 @@ generation:
     vehicles.
   augmentation_prompt: null
 sampler:
-  version: accident_group_v2
+  version: accident_group_v3
   operations:
   - relocation
   geometry_attempts: 64
-  # Common group displacement: radius r in [min, max] x (accident group mask bbox diagonal),
-  # angle uniform over the directions that keep the group in frame/grid at that r (r is
-  # redrawn if none), delta = round(r cos, vertical_scale * r sin). Sources with no valid
-  # move are held before generation. Initial values are UNVERIFIED conservative guesses;
-  # decide them with the GPU sweep (SPEC 5.3). max was lowered 0.3 -> 0.15 on 2026-10-12
-  # after visual failures at 0.3 (still unverified).
+  # Common group displacement: radius r in [floor, cap], angle uniform over the directions
+  # that keep the group in frame/grid at that r with floor <= |delta| <= cap (r is redrawn if
+  # none), delta = round(r cos, vertical_scale * r sin). D = accident group mask bbox diagonal.
+  # cap = max_displacement_fraction x D;
+  # floor = max(min_displacement_fraction x D, min_displacement_image_diag_fraction x image
+  # diagonal) and applies to the rounded |delta| AFTER vertical_scale.
+  # Sources with no valid move, including small groups whose floor exceeds the cap, are held
+  # before generation (the cap is never raised). Initial values are UNVERIFIED guesses;
+  # decide them with the GPU sweep (SPEC 5.3). max was lowered 0.3 -> 0.15 on 2026-10-12 and
+  # the floor raised 0.03 x D -> max(0.08 x D, 0.03 x image diagonal) on 2026-10-14 after
+  # visual failures (still unverified).
   max_displacement_fraction: 0.15
-  min_displacement_fraction: 0.03
+  min_displacement_fraction: 0.08
+  min_displacement_image_diag_fraction: 0.03
   vertical_scale: 0.5
   magnitude_distribution: uniform_radius
 segmentation:
@@ -109,10 +115,11 @@ visualization:
 report:
   terminal_progress: true
 accident_selection:
-  method: clip_contact_context_v2
-  captions_path: ../prompts/accident_vehicles_v2.json
+  method: clip_contact_context_v3
+  captions_path: ../prompts/accident_vehicles_v3.json
   context_padding: 0.25
-  # Deterministic pre-CLIP rules (v2). Set from the 10 development images (M009); unverified.
+  # Deterministic pre-CLIP rules. v2 rules set from the 10 development images (M009), v3
+  # detection filters from the blackbox_002 960px Mask R-CNN results (M011); unverified.
   rules:
     # Camera car hood: bbox bottom within 5% of image height from the bottom edge,
     # bbox width >= 60% of image width, area >= 10% of the image.
@@ -129,3 +136,17 @@ accident_selection:
     # overlapping only in perspective; it is excluded without CLIP scoring.
     distant_max_area_ratio: 0.1
     distant_min_bottom_gap_fraction: 0.25
+    # v3 detection false-positive filters, applied to each merged vehicle unit (duplicates
+    # merged, confidence = its best detection) after the hood rule and before contact analysis.
+    detection_min_score: 0.7
+    # Unit mask area as a fraction of the image (a close crash car reached 0.25).
+    max_area_fraction: 0.4
+    min_area_fraction: 0.001
+    # Top-edge structure: bbox top within this x H of the top edge AND bbox bottom at or
+    # above this x H (hangs from the top, e.g. a building facade detected as a bus).
+    top_touch_margin_fraction: 0.05
+    top_touch_max_bottom_fraction: 0.6
+    # Ground height: bbox bottom at or above this x H from the top is not on the road.
+    min_bottom_fraction: 0.1
+    # Largest 8-connected piece / unit mask area (pieces split by e.g. a pedestrian).
+    min_largest_component_fraction: 0.7

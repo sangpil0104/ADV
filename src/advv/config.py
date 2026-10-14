@@ -23,7 +23,7 @@ DEFAULT_AUGMENTATION_PROMPT = (
     "Translate all selected accident vehicles together, preserving their relative positions and contact. "
     "Keep visible accident damage and do not turn the scene into normal traffic."
 )
-SELECTORS = ("clip_contact_context_v1", "clip_contact_context_v2")
+SELECTORS = ("clip_contact_context_v1", "clip_contact_context_v2", "clip_contact_context_v3")
 SELECTION_RULES = {
     "ego_bottom_margin_fraction": (0, 0.5),
     "ego_min_width_fraction": (0, 1),
@@ -32,6 +32,15 @@ SELECTION_RULES = {
     "contact_gap_fraction": (0, 0.2),
     "distant_max_area_ratio": (0, 1),
     "distant_min_bottom_gap_fraction": (0, 10),
+}
+DETECTION_FILTER_RULES = {
+    "detection_min_score": (0, 1),
+    "max_area_fraction": (0, 1),
+    "min_area_fraction": (0, 1),
+    "top_touch_margin_fraction": (0, 0.5),
+    "top_touch_max_bottom_fraction": (0, 1),
+    "min_bottom_fraction": (0, 1),
+    "min_largest_component_fraction": (0, 1),
 }
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs/advv.clip.local.yaml"
@@ -168,8 +177,8 @@ def validate_config(cfg: dict) -> None:
             gpu_groups(e["selected_gpu_ids"])
         s = cfg["sampler"]
         require(
-            s["version"] == "accident_group_v2",
-            "Capped whole accident group sampler accident_group_v2 required; start a new run",
+            s["version"] == "accident_group_v3",
+            "Floored and capped whole accident group sampler accident_group_v3 required; start a new run",
         )
         require(
             s["operations"] == ["relocation"],
@@ -179,14 +188,19 @@ def validate_config(cfg: dict) -> None:
             type(s["geometry_attempts"]) is int and 1 <= s["geometry_attempts"] <= 512,
             "Invalid geometry attempts",
         )
-        low, high, scale = (
+        low, high, scale, floor = (
             s["min_displacement_fraction"],
             s["max_displacement_fraction"],
             s["vertical_scale"],
+            s["min_displacement_image_diag_fraction"],
         )
         require(
-            all(type(v) in (int, float) and math.isfinite(v) for v in (low, high, scale)),
+            all(type(v) in (int, float) and math.isfinite(v) for v in (low, high, scale, floor)),
             "Displacement fractions and vertical_scale must be finite numbers",
+        )
+        require(
+            0 <= floor <= 0.5,
+            "Require 0 <= min_displacement_image_diag_fraction <= 0.5 (image diagonal)",
         )
         require(
             0 <= low < high <= 1,
@@ -217,15 +231,23 @@ def validate_config(cfg: dict) -> None:
         if selector["method"] == "clip_contact_context_v1":
             require(rules is None, "clip_contact_context_v1 has no preprocessing rules; use v2")
         else:
+            ranges = dict(SELECTION_RULES)
+            if selector["method"] == "clip_contact_context_v3":
+                ranges.update(DETECTION_FILTER_RULES)
             require(
-                isinstance(rules, dict) and set(rules) == set(SELECTION_RULES),
-                f"clip_contact_context_v2 requires accident_selection.rules: {', '.join(SELECTION_RULES)}",
+                isinstance(rules, dict) and set(rules) == set(ranges),
+                f"{selector['method']} requires exactly accident_selection.rules: {', '.join(ranges)}",
             )
-            for key, (low, high) in SELECTION_RULES.items():
+            for key, (low, high) in ranges.items():
                 value = rules[key]
                 require(
                     type(value) in (int, float) and math.isfinite(value) and low <= value <= high,
                     f"accident_selection.rules.{key} must be in [{low}, {high}]",
+                )
+            if selector["method"] == "clip_contact_context_v3":
+                require(
+                    rules["min_area_fraction"] < rules["max_area_fraction"],
+                    "accident_selection.rules.min_area_fraction must be below max_area_fraction",
                 )
         require(
             type(selector["context_padding"]) in (int, float) and 0 <= selector["context_padding"] <= 1,
