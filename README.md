@@ -1,5 +1,7 @@
 # ADV
 
+기존 이름은 ADVV였으나, 아이디어가 조금 바뀌어 ADV로 수정합니다.
+
 DragFlow를 이용한 차량 사고 블랙박스 **단일 프레임 이미지 증강** 파이프라인입니다.
 사고 관련 차량 전체를 같은 방향과 거리로 이동시킨 후보를 생성하고, CLIP 검증을 통과한 고유 이미지가 요청한 총 N장이 되면 종료합니다.
 
@@ -158,3 +160,7 @@ advv preflight --target-count 10 --gpus 4,5,6,7 --image image3.png
 `no_eligible_sources`는 선택 가능한 사고 차량이 없다는 뜻이고, `no_ground_feasible_sources`는 선택 차량 전체를 지면 제약 안에서 이동시킬 수 없다는 뜻입니다.
 이 경우 원본의 `selection.png`와 `ground_preview.png`를 확인하세요.
 출력은 image-only이며 객체 box·분할 mask·class 정답을 자동 승계하지 않습니다. 원본과 파생본은 같은 데이터 분할에 두고 val/test는 증강하지 않습니다.
+
+Dear.
+프로젝트 설계에 도움을 준 강현욱, 박승우와
+소스코드에 기여해준 손동인에게 감사를 표합니다.
