@@ -23,11 +23,12 @@ dataset:
   enforce_group_disjoint: true
   enforce_cross_split_hash_disjoint: true
 generation:
+  repair_mode: endpoints
   source_prompt: A dashcam image of a road traffic accident involving one or more
     vehicles.
   augmentation_prompt: null
 sampler:
-  version: accident_group_v1
+  version: accident_group_ground_v1
   operations:
   - relocation
   geometry_attempts: 64
@@ -44,6 +45,17 @@ segmentation:
   score_threshold: 0.5
   mask_threshold: 0.5
   min_area_pixels: 32
+ground:
+  backend: segformer_cityscapes
+  model_id: nvidia/segformer-b0-finetuned-cityscapes-1024-1024
+  model_revision: 21b3847fae21ddee674abd31129307b6a1235bd9
+  model_path: null
+  files_sha256: {}
+  local_files_only: true
+  class_ids: [0, 1, 9]  # road, sidewalk, terrain; excludes buildings, sky and vehicles
+  confidence_threshold: 0.5
+  contact_points_per_vehicle: 3
+  contact_band_fraction: 0.1
 execution:
   mode: gpu_pairs_parallel
   conda_environment: ADVV

@@ -203,10 +203,24 @@ class Pipeline:
 
                 if result["selection"]["identity"] != selection_identity(self.cfg):
                     raise DataError("Accident selection cache identity changed")
+            if result.get("info", {}).get("error_code") != "segmenter_error":
+                from .ground import prepare_placement
+
+                placement = prepare_placement(source, result, self.cfg, self.root)
+                if result.get("ground_placement") != placement:
+                    result["ground_placement"] = placement
+                    atomic_json(path, result)
             self.segment_cache[source.source_id] = result
             self.clock.checkpoint()
-        self.eligible = [s for s in self.sources if self.segment_cache.get(s.source_id, {}).get("accident_group")]
+        self.eligible = [
+            s
+            for s in self.sources
+            if self.segment_cache.get(s.source_id, {}).get("accident_group")
+            and self.segment_cache[s.source_id].get("ground_placement", {}).get("status") == "ready"
+        ]
         if not self.eligible:
+            if any(r.get("accident_group") for r in self.segment_cache.values()):
+                raise DataError("no_ground_feasible_sources")
             raise DataError("no_eligible_sources")
 
     def _recover(self):
@@ -565,7 +579,8 @@ class Pipeline:
             except Exception as exc:
                 code = (
                     str(exc)
-                    if str(exc) in ("no_eligible_sources", "consecutive_technical_failures")
+                    if str(exc)
+                    in ("no_eligible_sources", "no_ground_feasible_sources", "consecutive_technical_failures")
                     else type(exc).__name__
                 )
                 self.state["last_error"] = {"code": code}

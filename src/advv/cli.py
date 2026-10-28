@@ -64,6 +64,10 @@ def main(argv=None):
             metavar="FILE",
             help="Augment only this file relative to assets/inputs (e.g. image1.png); default: all inputs",
         )
+        p.add_argument(
+            "--repair-mode", choices=["endpoints", "swept"],
+            help="Background repair: endpoints (new default) or swept (legacy full drag path)",
+        )
         if name == "run":
             p.add_argument("--prompt", help="Optional augmentation instruction; CLIP criteria stay fixed")
             p.add_argument(
@@ -78,11 +82,15 @@ def main(argv=None):
             p.add_argument("--resume", action="store_true")
     p = sub.add_parser("prepare", help="Download the pinned models; inference remains offline")
     p.add_argument("--project", type=Path, default=Path.cwd())
-    p.add_argument("--only", choices=["all", "clip", "segmenter", "dragflow", "support"], default="all")
+    p.add_argument(
+        "--only", choices=["all", "clip", "segmenter", "ground", "dragflow", "support"], default="all"
+    )
     for name in ("export", "report"):
         p = sub.add_parser(name)
         p.add_argument("--run-dir", type=Path, required=True)
-    p = sub.add_parser("visualize", help="Group previews by kind and build an image overview without inference")
+    p = sub.add_parser(
+        "visualize", help="Group previews by kind and build an image overview without inference"
+    )
     group = p.add_mutually_exclusive_group(required=True)
     group.add_argument("--run-dir", type=Path)
     group.add_argument("--all", action="store_true", help="Include assets/outputs and legacy runs")
@@ -100,6 +108,8 @@ def main(argv=None):
             parser.error("Resume uses the saved prompt; omit --prompt or start a new run")
         if args.resume and args.image is not None:
             parser.error("Resume uses the saved image selection; omit --image or start a new run")
+        if args.resume and args.repair_mode is not None:
+            parser.error("Resume uses the saved repair mode; omit --repair-mode or start a new run")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
         require_advv()
@@ -150,6 +160,7 @@ def main(argv=None):
                 gpus=args.gpus,
                 prompt=getattr(args, "prompt", None),
                 image=args.image,
+                repair_mode=args.repair_mode,
             )
             if args.command == "run":
                 if args.run_dir:
@@ -186,7 +197,10 @@ def main(argv=None):
             lane_cfg = copy.deepcopy(cfg)
             lane_cfg["execution"]["selected_gpu_ids"] = group
             backends.append(LocalBackend(lane_cfg, root))
-        logging.info("Run: %s | GPU groups: %s | Shared target: %s", root, groups, cfg["run"]["target_count"])
+        logging.info(
+            "Run: %s | GPU groups: %s | Shared target: %s | Repair mode: %s",
+            root, groups, cfg["run"]["target_count"], cfg["generation"].get("repair_mode", "swept"),
+        )
         state = Pipeline(
             root, backends, gpu_ids=cfg["execution"]["selected_gpu_ids"], initial_seconds=initial_seconds
         ).run()

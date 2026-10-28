@@ -12,7 +12,7 @@ from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont
 from .storage import atomic_image, atomic_json, digest, file_hash, load_rgb, safe_id, within
 from .errors import DataError
 
-RENDERER_VERSION = "pillow_accident_group_v1"
+RENDERER_VERSION = "pillow_accident_group_ground_v1"
 LAYOUT_VERSION = "by_kind_v1"
 
 
@@ -80,6 +80,24 @@ def _font(size=16):
     return ImageFont.load_default(size=size)
 
 
+def render_ground(run_dir, source, ground):
+    """Source ground diagnostic; never a generation or CLIP input."""
+    from .ground import validate_ground
+
+    original = load_rgb(within(run_dir, source["image_path"], must_exist=True))
+    mask = validate_ground(run_dir, ground, original.size)
+    factor = min(1.0, 1024 / max(original.size))
+    size = tuple(max(1, round(v * factor)) for v in original.size)
+    overlay = original.resize(size, Image.Resampling.LANCZOS).convert("RGBA")
+    visible = Image.fromarray(mask.astype(np.uint8) * 255).resize(size, Image.Resampling.NEAREST)
+    layer = Image.new("RGBA", size, "#FFB000")
+    layer.putalpha(visible.point(lambda value: round(value * 0.3)))
+    overlay = Image.alpha_composite(overlay, layer).convert("RGB")
+    relative = f"segments/{source['source_id']}/ground_preview.png"
+    atomic_image(within(run_dir, relative), overlay)
+    return relative
+
+
 def _status(record, name):
     check = record.get("checks", {}).get(name, {})
     return (
@@ -103,6 +121,15 @@ def render_plan_panel(run_dir, original, plan, geometry, settings, *, show_label
     # Actual rounded panel sizes determine transform, never a guessed scale.
     sx, sy = pw / w, ph / h
     overlay = original.resize((pw, ph), Image.Resampling.LANCZOS).convert("RGBA")
+    constraint = plan.get("operation_params", {}).get("ground_constraint")
+    if constraint:
+        from .ground import validate_ground
+
+        ground = validate_ground(run_dir, constraint["ground"], original.size, constraint["settings"])
+        visible = Image.fromarray(ground.astype(np.uint8) * 255).resize((pw, ph), Image.Resampling.NEAREST)
+        layer = Image.new("RGBA", overlay.size, "#FFB000")
+        layer.putalpha(visible.point(lambda value: round(value * 0.15)))
+        overlay = Image.alpha_composite(overlay, layer)
     preview_mask = mask.resize((pw, ph), Image.Resampling.NEAREST)
     blue = Image.new("RGBA", overlay.size, ImageColor.getrgb(settings["area_color"]) + (0,))
     blue.putalpha(preview_mask.point(lambda x: round(x * settings["area_alpha"])))
@@ -144,6 +171,11 @@ def render_plan_panel(run_dir, original, plan, geometry, settings, *, show_label
                 stroke_fill="black",
             )
     draw = ImageDraw.Draw(overlay)
+    if constraint:
+        for member in constraint["contacts"]:
+            for x, y in member["targets"]["effective"]:
+                x, y = x * sx, y * sy
+                draw.ellipse((x - 3, y - 3, x + 3, y + 3), fill="#FFB000", outline="black")
     start = tuple(geometry["source_point"][i] * (sx, sy)[i] for i in range(2))
     end = tuple(geometry["target_point"][i] * (sx, sy)[i] for i in range(2))
     draw.line([start, end], fill="black", width=6)
@@ -255,7 +287,10 @@ def render(run_dir: Path, source: dict, record: dict, settings: dict) -> dict:
             f"Requested S={point(plan['source_point'])} E={point(plan['target_point'])}; backend grid/rounding recorded"
         )
     if plan["operation_params"]:
-        lines.append(str(plan["operation_params"]))
+        lines.append(str({k: v for k, v in plan["operation_params"].items() if k != "ground_constraint"}))
+    constraint = plan["operation_params"].get("ground_constraint")
+    if constraint:
+        lines.append("Amber=segmented ground and planned contact proxies; not measured generated contacts")
     font = _font()
     artifacts = {}
 
@@ -311,6 +346,7 @@ def render(run_dir: Path, source: dict, record: dict, settings: dict) -> dict:
         "timing": record.get("timing"),
         "segment_id": plan.get("segment_id"),
         "accident_group": group,
+        "ground_constraint": constraint,
         "motion_diagnostics": record.get("generation_info", {}).get("motion_diagnostics"),
         "candidate_status": record["status"],
         "renderer_version": RENDERER_VERSION,

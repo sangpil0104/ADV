@@ -10,6 +10,7 @@ from .accident_group import validate_group
 from .contracts import EditRequest, Source
 from .errors import DataError
 from .group_geometry import feature_grid, group_grid_geometry
+from .ground import group_contacts, placement_evidence, prepare_placement
 from .segmentation import load_mask
 from .storage import atomic_image, digest, file_hash, read_json, within
 
@@ -35,18 +36,17 @@ def sample_edit(source: Source, segments: dict, cfg: dict, attempt_index: int, r
     ys, xs = np.nonzero(mask)
     # This virtual centroid may be between vehicles or in a mask hole.
     start = [float(xs.mean()), float(ys.mean())]
-    for _ in range(settings["geometry_attempts"]):
-        delta = [
-            int(rng.integers(-int(xs.min()), w - int(xs.max()))),
-            int(rng.integers(-int(ys.min()), h - int(ys.max()))),
-        ]
-        try:
-            geometry = group_grid_geometry(mask, delta, members)
-        except DataError:
-            continue
-        break
-    else:
-        raise DataError("No valid nonidentity whole accident group translation; no partial-mask fallback")
+    placement = prepare_placement(source, segments, cfg, run_dir)
+    if placement["status"] != "ready":
+        raise DataError("No valid whole-group ground translation; no unrestricted fallback")
+    feasible = load_mask(run_dir, placement["mask_path"], placement["mask_sha256"], placement["size"])
+    choice = int(rng.choice(np.flatnonzero(feasible)))
+    yy, xx = np.unravel_index(choice, feasible.shape)
+    delta = [int(xx) + placement["offset_xy"][0], int(yy) + placement["offset_xy"][1]]
+    geometry = group_grid_geometry(mask, delta, members)
+    evidence = placement_evidence(
+        segments["ground"], placement["contacts"], cfg["ground"], delta, geometry, (w, h), run_dir
+    )
     end = [start[i] + delta[i] for i in (0, 1)]
     eid = candidate_id(source, cfg, attempt_index)
     mask_path = f".staging/{eid}/edit_mask.png"
@@ -67,7 +67,11 @@ def sample_edit(source: Source, segments: dict, cfg: dict, attempt_index: int, r
         seed=seed,
         sampler_version=settings["version"],
         operation="relocation",
-        operation_params={"displacement_pixels": delta, "group_grid_geometry": geometry},
+        operation_params={
+            "displacement_pixels": delta,
+            "group_grid_geometry": geometry,
+            "ground_constraint": evidence,
+        },
         region_mask_path=mask_path,
         source_point=start,
         target_point=end,
@@ -88,11 +92,15 @@ def sample_edit(source: Source, segments: dict, cfg: dict, attempt_index: int, r
 
 
 def validate_plan(plan: EditRequest, source: Source, run_dir: Path) -> None:
+    config_path = run_dir / "config.json"
+    run_config = read_json(config_path) if config_path.is_file() else None
+    if run_config and plan.sampler_version != run_config["sampler"]["version"]:
+        raise DataError("Plan sampler differs from the saved run")
     if (
         plan.schema_version != "2.0"
         or plan.source_id != source.source_id
         or plan.operation != "relocation"
-        or plan.sampler_version != "accident_group_v1"
+        or plan.sampler_version not in ("accident_group_v1", "accident_group_ground_v1")
         or plan.anchor_point is not None
     ):
         raise DataError("Invalid source, schema, or whole-group operation in edit plan")
@@ -129,6 +137,27 @@ def validate_plan(plan: EditRequest, source: Source, run_dir: Path) -> None:
     members = [load_mask(run_dir, m["mask_path"], m["mask_sha256"], size) for m in group["members"]]
     if group_grid_geometry(mask, delta, members) != plan.operation_params["group_grid_geometry"]:
         raise DataError("Group feature geometry changed")
+    if plan.sampler_version == "accident_group_ground_v1":
+        evidence = plan.operation_params.get("ground_constraint")
+        if not evidence:
+            raise DataError("Missing ground placement evidence")
+        settings = evidence["settings"]
+        if result_path.exists() and read_json(result_path).get("ground") != evidence["ground"]:
+            raise DataError("Plan ground differs from source segmentation")
+        if run_config and settings != run_config["ground"]:
+            raise DataError("Ground plan settings differ from saved run")
+        contacts = group_contacts(group, run_dir, size, settings)
+        expected = placement_evidence(
+            evidence["ground"],
+            contacts,
+            settings,
+            delta,
+            plan.operation_params["group_grid_geometry"],
+            size,
+            run_dir,
+        )
+        if expected != evidence:
+            raise DataError("Ground placement evidence changed")
     if int(mask.sum()) != plan.area_pixels or not math.isclose(
         plan.area_pixels / (size[0] * size[1]), plan.range_fraction_of_image
     ):

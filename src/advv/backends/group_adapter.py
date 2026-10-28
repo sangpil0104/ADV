@@ -13,19 +13,25 @@ from ..errors import BackendError
 from ..group_geometry import group_grid_geometry, translate_mask
 
 
-def repair_support(mask, delta, grid_delta, grid_size):
+def repair_support(mask, delta, grid_delta, grid_size, *, mode="endpoints"):
+    """Allow restoration near the endpoints, or along the legacy swept path."""
+    if mode not in ("endpoints", "swept"):
+        raise BackendError(f"Unsupported repair mode: {mode}")
     h, w = mask.shape
     effective_delta = [round(grid_delta[i] * (w, h)[i] / grid_size[i]) for i in (0, 1)]
     support = mask.copy()
     for dx, dy in (delta, effective_delta):
-        steps = max(1, int(np.ceil(max(abs(dx), abs(dy)) / 8)))
-        for i in range(1, steps + 1):
-            support |= translate_mask(mask, round(dx * i / steps), round(dy * i / steps))
+        if mode == "endpoints":
+            support |= translate_mask(mask, dx, dy)
+        else:
+            steps = max(1, int(np.ceil(max(abs(dx), abs(dy)) / 8)))
+            for i in range(1, steps + 1):
+                support |= translate_mask(mask, round(dx * i / steps), round(dy * i / steps))
     # This support is only for background restoration, never the moving object mask.
     return ndimage.binary_dilation(support, iterations=8)
 
 
-def attach_group_masks(instruction, mask, plan, *, device, dtype):
+def attach_group_masks(instruction, mask, plan, *, device, dtype, repair_mode="endpoints"):
     import torch
 
     geometry = group_grid_geometry(mask, plan.operation_params["displacement_pixels"])
@@ -33,7 +39,8 @@ def attach_group_masks(instruction, mask, plan, *, device, dtype):
     op["region"] = torch.as_tensor(mask.astype(np.float32), device=device, dtype=dtype)[None, None]
     op["raw_weight"] = op["norm_weight"] = torch.tensor(1.0, device=device, dtype=dtype)
     support = repair_support(
-        mask, plan.operation_params["displacement_pixels"], geometry["grid_delta"], geometry["grid_size"]
+        mask, plan.operation_params["displacement_pixels"], geometry["grid_delta"], geometry["grid_size"],
+        mode=repair_mode,
     )
     instruction["mask"] = torch.as_tensor(support.astype(np.float32), device=device, dtype=dtype)[None, None]
     instruction["source_mask"] = None

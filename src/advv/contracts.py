@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
 
 
 @dataclass(frozen=True)
@@ -52,14 +52,6 @@ class EditRequest:
 
     def to_dict(self) -> dict:
         return asdict(self)
-
-
-@dataclass
-class RawResponse:
-    """Legacy Qwen response type; not used by the v2 production path."""
-
-    text: str
-    info: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

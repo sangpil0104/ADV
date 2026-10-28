@@ -130,7 +130,12 @@ class DragFlow:
         raw = load_rgb(within(root, source.image_path))
         instruction = copy.deepcopy(instruction_dict)
         requested_mask = load_mask(root, plan.region_mask_path, plan.mask_sha256, raw.size)
-        support = attach_group_masks(instruction, requested_mask, plan, device="cuda:0", dtype=torch.float32)
+        # Missing mode denotes the historical saved recipe; new configs always resolve it explicitly.
+        repair_mode = self.cfg["generation"].get("repair_mode", "swept")
+        support = attach_group_masks(
+            instruction, requested_mask, plan, device="cuda:0", dtype=torch.float32,
+            repair_mode=repair_mode,
+        )
         support_path = f".staging/{plan.edit_id}/backend/repair_support.png"
         atomic_image(within(root, support_path), Image.fromarray(support.astype(np.uint8) * 255))
         for gpu in range(torch.cuda.device_count()):
@@ -173,6 +178,8 @@ class DragFlow:
             "common_grid_displacement": list(op["full_delta"]),
             "repair_support_path": support_path,
             "repair_support_sha256": file_hash(within(root, support_path)),
+            "repair_mode": repair_mode,
+            "repair_padding_pixels": 8,
             "transform": {
                 "resize_image": "bicubic_to_floor_multiple_16",
                 "padding": [0, 0, 0, 0],

@@ -9,7 +9,7 @@
     "sha256": "bf2d0c1efbc936eeee2bc95a48e80ebc86b891f61b0106485937fc29f9315fc0"
   },
   "models": {
-    "Qwen/Qwen3.5-4B": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+    "nvidia/segformer-b0-finetuned-cityscapes-1024-1024": "21b3847fae21ddee674abd31129307b6a1235bd9",
     "black-forest-labs/FLUX.1-dev": "3de623fc3c33e44ffbe2bad470d0f45bccf2eb21",
     "Tencent/InstantCharacter": "96c610b9c87ff7379c3784fe1ff566feec39e352",
     "google/siglip-so400m-patch14-384": "9fdffc58afc957d1a03a25b10dba0329ab15c2a3",

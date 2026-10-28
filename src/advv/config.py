@@ -9,6 +9,7 @@ import yaml
 from .errors import ConfigError
 from .storage import digest, read_json
 from .verifiers.decision import validate_criteria
+from .ground import GROUND_MODEL, GROUND_REVISION, GROUND_LABELS
 
 PATH_FIELDS = {
     "run": ["output_root"],
@@ -17,6 +18,7 @@ PATH_FIELDS = {
     "verifier": ["model_path", "criteria_path"],
     "segmentation": ["weights_path"],
     "accident_selection": ["captions_path"],
+    "ground": ["model_path"],
 }
 DEFAULT_SOURCE_PROMPT = "A dashcam image of a road traffic accident involving one or more vehicles."
 DEFAULT_AUGMENTATION_PROMPT = (
@@ -27,7 +29,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs/advv.clip.local.yaml"
 
 
-def load_config(path: Path, *, input_dir=None, target_count=None, gpus=None, prompt=None, image=None) -> dict:
+def load_config(
+    path: Path, *, input_dir=None, target_count=None, gpus=None, prompt=None, image=None, repair_mode=None
+) -> dict:
     path = path.resolve()
     cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(cfg, dict) or cfg.get("schema_version") != "2.0":
@@ -50,6 +54,9 @@ def load_config(path: Path, *, input_dir=None, target_count=None, gpus=None, pro
         cfg["generation"]["augmentation_prompt"] = prompt
     if image is not None:
         cfg["dataset"]["image"] = str(image)
+    if repair_mode is not None:
+        cfg["generation"]["repair_mode"] = repair_mode
+    cfg["generation"].setdefault("repair_mode", "endpoints")
     cfg["generation"]["source_prompt"] = cfg["generation"].get("source_prompt") or DEFAULT_SOURCE_PROMPT
     raw = cfg["generation"].get("augmentation_prompt")
     if raw is not None and (not isinstance(raw, str) or not raw.strip()):
@@ -99,6 +106,10 @@ def validate_config(cfg: dict) -> None:
     require(cfg.get("schema_version") == "2.0", "Legacy VQA runs cannot be resumed by CLIP")
     try:
         r, d, e = cfg["run"], cfg["dataset"], cfg["execution"]
+        require(
+            cfg["generation"].get("repair_mode", "swept") in ("endpoints", "swept"),
+            "generation.repair_mode must be endpoints or swept",
+        )
         output_root, dataset_root = Path(r["output_root"]).resolve(), Path(d["root"]).resolve()
         require(
             not output_root.is_relative_to(dataset_root) and not dataset_root.is_relative_to(output_root),
@@ -157,7 +168,9 @@ def validate_config(cfg: dict) -> None:
             e["selected_gpu_ids"] = parse_gpus(e["selected_gpu_ids"])
             gpu_groups(e["selected_gpu_ids"])
         s = cfg["sampler"]
-        require(s["version"] == "accident_group_v1", "Whole accident group sampler required; start a new run")
+        require(
+            s["version"] == "accident_group_ground_v1", "Ground-constrained sampler required; start a new run"
+        )
         require(
             s["operations"] == ["relocation"],
             "v2 baseline supports relocation; other mappings need validation",
@@ -220,6 +233,35 @@ def validate_config(cfg: dict) -> None:
                 f"Invalid segmentation {name}",
             )
         require(type(seg["min_area_pixels"]) is int and seg["min_area_pixels"] > 0, "Invalid segment area")
+        ground = cfg["ground"]
+        require(ground["backend"] == "segformer_cityscapes", "Unsupported ground segmenter")
+        require(
+            ground["model_id"] == GROUND_MODEL and ground["model_revision"] == GROUND_REVISION,
+            "Pinned ground model revision required",
+        )
+        require(ground["local_files_only"] is True, "Ground inference must be offline")
+        require(
+            isinstance(ground["class_ids"], list)
+            and bool(ground["class_ids"])
+            and all(type(i) is int and i in GROUND_LABELS for i in ground["class_ids"])
+            and len(set(ground["class_ids"])) == len(ground["class_ids"]),
+            "Invalid ground classes",
+        )
+        require(
+            type(ground["confidence_threshold"]) in (int, float) and 0 < ground["confidence_threshold"] <= 1,
+            "Invalid ground confidence",
+        )
+        require(
+            type(ground["contact_points_per_vehicle"]) is int
+            and 2 <= ground["contact_points_per_vehicle"] <= 16,
+            "Invalid ground contact point count",
+        )
+        require(
+            type(ground["contact_band_fraction"]) in (int, float)
+            and 0 < ground["contact_band_fraction"] <= 0.25,
+            "Invalid ground contact band",
+        )
+        require(isinstance(ground["files_sha256"], dict), "Ground checkpoint hashes required")
         raw = cfg["generation"].get("augmentation_prompt")
         require(raw is None or isinstance(raw, str) and bool(raw.strip()), "Empty augmentation prompt")
         require(

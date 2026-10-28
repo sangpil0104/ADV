@@ -100,7 +100,7 @@ def preflight(cfg: dict, *, check_inputs=True) -> dict:
     probes = {
         "generator": 'import sys; sys.path.insert(0,"framework"); from dragger import Dragger; import torch; print(torch.__version__)',
         "verifier": "from transformers import CLIPModel, CLIPProcessor; import torch, transformers; print(torch.__version__, transformers.__version__)",
-        "segmenter": "from torchvision.models.detection import MaskRCNN; import torchvision; print(torchvision.__version__)",
+        "segmenter": "from torchvision.models.detection import MaskRCNN; from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor; import torchvision; print(torchvision.__version__)",
     }
     for kind, code in probes.items():
         interpreter = sys.executable

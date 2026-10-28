@@ -38,6 +38,7 @@ class VehicleSegmenter:
 
         source = request["source"]
         image = load_rgb(within(self.root, source["image_path"], must_exist=True))
+        self.model.to(self.device)
         with self.torch.inference_mode():
             result = self.model([to_tensor(image).to(self.device)])[0]
         settings = self.cfg["segmentation"]
@@ -75,11 +76,23 @@ class VehicleSegmenter:
         scorer = CLIPVerifier(self.cfg, device=self.device, captions=captions) if segments else None
         selection = select_vehicles(image, segments, self.root, self.cfg, scorer)
         group = build_group(source["source_id"], image.size, segments, selection, self.root)
+        # Release the large vehicle/CLIP models before the separate semantic pass.
+        self.model.to("cpu")
+        del scorer
+        if self.device.startswith("cuda"):
+            self.torch.cuda.empty_cache()
+        from .ground import GroundSegmenter
+
+        ground = GroundSegmenter(self.cfg, self.root, device=self.device)(image, source["source_id"])
+        from ..visualization import render_ground
+
+        ground["preview_path"] = render_ground(self.root, source, ground)
         preview = render_selection(self.root, source, segments, selection)
         return {
             "segments": segments,
             "selection": selection,
             "accident_group": group,
+            "ground": ground,
             "selection_preview": preview,
             "source_sha256": source["pixel_sha256"],
             "settings_sha256": digest(settings),
